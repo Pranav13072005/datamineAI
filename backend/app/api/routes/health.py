@@ -5,7 +5,8 @@ import logging
 from fastapi import APIRouter
 from sqlalchemy import text
 
-from app.db.session import get_engine
+from app.utils.config import settings
+from app.utils.database import get_engine
 
 
 logger = logging.getLogger(__name__)
@@ -39,4 +40,9 @@ def health_check() -> dict:
     return {
         "status": "ok",
         "database": database,
+        "llm": {
+            "provider": "groq",
+            "configured": bool(settings.GROQ_API_KEY),
+            "model": settings.GROQ_MODEL,
+        },
     }

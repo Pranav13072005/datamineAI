@@ -1,6 +1,15 @@
 import { useState, useCallback } from 'react';
 import { datasetAPI } from '../services/api';
 
+const getErrorMessage = (err, fallback) => {
+  // Axios-style errors
+  const detail = err?.response?.data?.detail;
+  if (typeof detail === 'string' && detail.trim()) return detail;
+  const message = err?.message;
+  if (typeof message === 'string' && message.trim()) return message;
+  return fallback;
+};
+
 export const useDatasets = () => {
   const [datasets, setDatasets] = useState([]);
   const [loading, setLoading] = useState(false);
@@ -11,10 +20,13 @@ export const useDatasets = () => {
     setError(null);
     try {
       const response = await datasetAPI.getAll();
-      setDatasets(response.data || []);
+      const list = response.data || [];
+      setDatasets(list);
+      return list;
     } catch (err) {
-      setError(err.message || 'Failed to fetch datasets');
+      setError(getErrorMessage(err, 'Failed to fetch datasets'));
       setDatasets([]);
+      return [];
     } finally {
       setLoading(false);
     }
@@ -22,32 +34,38 @@ export const useDatasets = () => {
 
   const uploadDataset = useCallback(async (formData) => {
     setLoading(true);
-    setError(null);
     try {
       const response = await datasetAPI.upload(formData);
-      setDatasets([...datasets, response.data]);
-      return response.data;
+      // Backend returns: { dataset_id, filename, row_count, columns: string[], message }
+      // UI expects: { id, name, rows, columns }
+      const payload = response.data;
+      const mapped = {
+        id: payload.dataset_id,
+        name: payload.filename,
+        rows: payload.row_count,
+        columns: Array.isArray(payload.columns) ? payload.columns.length : 0,
+        uploaded_at: new Date().toISOString(),
+      };
+      setDatasets((prev) => [mapped, ...prev]);
+      return mapped;
     } catch (err) {
-      setError(err.message || 'Failed to upload dataset');
-      throw err;
+      throw new Error(getErrorMessage(err, 'Failed to upload dataset'));
     } finally {
       setLoading(false);
     }
-  }, [datasets]);
+  }, []);
 
   const deleteDataset = useCallback(async (datasetId) => {
     setLoading(true);
-    setError(null);
     try {
       await datasetAPI.delete(datasetId);
-      setDatasets(datasets.filter((d) => d.id !== datasetId));
+      setDatasets((prev) => prev.filter((d) => d.id !== datasetId));
     } catch (err) {
-      setError(err.message || 'Failed to delete dataset');
-      throw err;
+      throw new Error(getErrorMessage(err, 'Failed to delete dataset'));
     } finally {
       setLoading(false);
     }
-  }, [datasets]);
+  }, []);
 
   return {
     datasets,

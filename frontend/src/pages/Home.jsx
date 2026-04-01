@@ -3,6 +3,7 @@ import { useNavigate } from 'react-router-dom';
 import { Upload as UploadIcon } from 'lucide-react';
 import { FileUpload, DatasetList } from '../components';
 import { useDatasets } from '../hooks/useDatasets';
+import { MAX_UPLOAD_MB } from '../utils/config';
 
 export default function Home() {
   const navigate = useNavigate();
@@ -132,7 +133,7 @@ export default function Home() {
                   </li>
                   <li className="flex items-center gap-2">
                     <span className="w-1.5 h-1.5 rounded-full bg-blue-400"></span>
-                    Max file size: 50MB
+                    Max file size: {MAX_UPLOAD_MB}MB
                   </li>
                 </ul>
               </div>

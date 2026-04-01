@@ -4,7 +4,11 @@ import { exportAPI } from '../services/api';
 export const useExport = () => {
   const exportToPDF = useCallback(async (data) => {
     try {
-      const blob = await exportAPI.exportPDF(data);
+      const response = await exportAPI.exportPDF(data);
+      const blob = response.data instanceof Blob
+        ? response.data
+        : new Blob([response.data], { type: 'application/pdf' });
+
       const url = window.URL.createObjectURL(blob);
       const link = document.createElement('a');
       link.href = url;

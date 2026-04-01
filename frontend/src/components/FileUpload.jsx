@@ -1,5 +1,6 @@
 import { useState, useRef } from 'react';
 import { Upload, X } from 'lucide-react';
+import { MAX_UPLOAD_MB } from '../utils/config';
 
 export default function FileUpload({ onFileSelect, loading = false }) {
   const [isDragging, setIsDragging] = useState(false);
@@ -40,6 +41,12 @@ export default function FileUpload({ onFileSelect, loading = false }) {
     const validTypes = ['text/csv', 'application/vnd.ms-excel', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'];
     if (!validTypes.includes(file.type) && !file.name.match(/\.(csv|xlsx|xls)$/i)) {
       alert('Please select a valid CSV or Excel file');
+      return;
+    }
+
+    const maxBytes = MAX_UPLOAD_MB * 1024 * 1024;
+    if (Number.isFinite(maxBytes) && file.size > maxBytes) {
+      alert(`File is too large. Max file size is ${MAX_UPLOAD_MB}MB.`);
       return;
     }
 
@@ -87,7 +94,7 @@ export default function FileUpload({ onFileSelect, loading = false }) {
           </h3>
           <p className="text-slate-400 mb-4 font-medium">or click to browse</p>
           <p className="text-xs text-slate-500">
-            CSV, Excel (.xlsx, .xls) • Max 50MB
+            CSV, Excel (.xlsx, .xls) • Max {MAX_UPLOAD_MB}MB
           </p>
         </div>
       </div>

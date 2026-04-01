@@ -23,15 +23,16 @@ export default function Dashboard() {
   const [selectedResult, setSelectedResult] = useState(null);
 
   useEffect(() => {
-    fetchDatasets().then(() => {
-      const dataset = datasets.find((d) => d.id === datasetId);
+    (async () => {
+      const list = await fetchDatasets();
+      const dataset = list.find((d) => d.id === datasetId);
       if (dataset) {
         setCurrentDataset(dataset);
-      } else if (datasets.length === 0) {
+      } else if (list.length === 0) {
         navigate('/');
       }
-    });
-  }, [datasetId, datasets.length]);
+    })();
+  }, [datasetId, fetchDatasets, navigate]);
 
   const handleQuerySubmit = async (question) => {
     if (!currentDataset) return;

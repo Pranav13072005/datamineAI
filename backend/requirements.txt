@@ -8,3 +8,6 @@ python-dotenv
 sqlalchemy
 psycopg2-binary
 httpx
+fpdf2
+openpyxl
+pytest
