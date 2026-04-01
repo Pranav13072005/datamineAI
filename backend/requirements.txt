@@ -11,3 +11,4 @@ httpx
 fpdf2
 openpyxl
 pytest
+RestrictedPython

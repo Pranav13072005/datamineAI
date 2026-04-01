@@ -4,3 +4,4 @@ export { default as QueryBox } from './QueryBox';
 export { default as ResultsTable } from './ResultsTable';
 export { default as ChartView } from './ChartView';
 export { default as InsightsPanel } from './InsightsPanel';
+export { default as QueryResult } from './QueryResult';

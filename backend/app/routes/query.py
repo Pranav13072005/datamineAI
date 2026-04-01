@@ -1,29 +1,42 @@
-"""
-query.py — POST /query route.
+"""query.py — POST /query route.
 
 Accepts a dataset_id and a natural-language question.
-Pipeline:
-  1. Validate dataset_id exists in the database.
-  2. Load the DataFrame from disk.
-  3. Extract schema (columns, dtypes, sample rows).
-  4. Send schema + question to the AI service → get Python code back.
-  5. Safely execute the code on the DataFrame.
-  6. Save the question + answer to the `history` table.
-  7. Return the result to the client.
+
+This endpoint intentionally returns a consistent response shape for *all* queries
+to keep the frontend stable.
+
+Flow:
+    1) Validate dataset exists.
+    2) Load DataFrame from disk.
+    3) Extract schema.
+    4) Classify the question (smalltalk/descriptive/analytical).
+    5) Route to deterministic handlers where possible.
+    6) Persist history.
+    7) Return a QueryResponse (always JSON-serializable).
 """
 
+from __future__ import annotations
+
+import logging
+from typing import Any
+
+import httpx
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
-from typing import Any
-import re
 
 from app.models import Dataset, History
-from app.services.ai_service import LLMError, generate_response
-from app.services.data_service import build_dataset_overview, execute_query_code, get_schema, load_dataset
+from app.schemas.query import QueryResponse
+from app.services.analytical_handler import handle_analytical
+from app.services.data_service import get_schema, load_dataset
+from app.services.descriptive_handler import handle_descriptive
+from app.services.query_classifier import classify_query
+from app.utils.config import settings
 from app.utils.database import get_db
 
 router = APIRouter()
+
+logger = logging.getLogger(__name__)
 
 
 # ─── Request / Response schemas ───────────────────────────────────────────────
@@ -31,20 +44,6 @@ router = APIRouter()
 class QueryRequest(BaseModel):
     dataset_id: str
     question: str
-
-
-class QueryResponse(BaseModel):
-    dataset_id: str
-    question: str
-    # Preferred structured UI fields (optional)
-    response: str | None = None
-    insights: list[str] | None = None
-    table_data: list[dict[str, Any]] | None = None
-    table_title: str | None = None
-
-    # Backwards-compatible payload field
-    result: Any | None = None          # Can be scalar, list, dict, etc.
-    history_id: str
 
 
 # ─── Route ────────────────────────────────────────────────────────────────────
@@ -71,31 +70,6 @@ async def query_dataset(
             detail=f"Dataset '{request.dataset_id}' not found. Upload it first via POST /upload.",
         )
 
-    # Small talk / non-analytic questions: answer directly without LLM/code execution.
-    # This avoids failures when the model returns plain text or when the user is just testing.
-    if _is_smalltalk(question):
-        result = (
-            "Hi! I'm ready. Ask me something about this dataset — for example: "
-            "'Show the top 5 rows', 'How many rows are positive sentiment?', or "
-            "'What is the distribution of sentiment?'."
-        )
-
-        history_entry = History(
-            dataset_id=request.dataset_id,
-            question=question,
-            answer=str(result),
-        )
-        db.add(history_entry)
-        db.commit()
-        db.refresh(history_entry)
-
-        return QueryResponse(
-            dataset_id=request.dataset_id,
-            question=question,
-            result=result,
-            history_id=history_entry.id,
-        )
-
     # ── 2. Load DataFrame from disk ───────────────────────────────────────────
     try:
         df = load_dataset(request.dataset_id)
@@ -105,108 +79,83 @@ async def query_dataset(
             detail=f"Dataset file for '{request.dataset_id}' is missing from disk.",
         )
 
-    # Dataset overview / explanation questions: answer deterministically with pandas
-    # (no LLM needed), so users get an actual analysis rather than suggested code.
-    if _is_overview_question(question):
-        overview = build_dataset_overview(df)
+    # ── 3. Extract schema ─────────────────────────────────────────────────────
+    schema = get_schema(df)
 
+    # ── 4. Classify + route ──────────────────────────────────────────────────
+    query_type = classify_query(question, schema)
+    logger.info("query_classified", extra={"query_type": query_type})
+
+    response: QueryResponse
+    if query_type == "smalltalk":
+        response = QueryResponse(
+            answer=(
+                "Hi! I’m ready. Ask me something about this dataset — for example: "
+                "‘Show the top 5 rows’, ‘What columns exist?’, or ‘Which values are highest/lowest?’."
+            ),
+            query_type="smalltalk",
+        )
+    elif query_type == "descriptive":
+        response = handle_descriptive(df, question)
+    else:
+        # Analytical: use strict JSON plan + sandboxed execution.
+        response = handle_analytical(df, question, _groq_callable)
+
+    # ── 5. Persist history ───────────────────────────────────────────────────
+    # Store the human-readable answer for now.
+    try:
         history_entry = History(
             dataset_id=request.dataset_id,
             question=question,
-            answer=str(overview.get("response") or overview),
+            answer=response.answer,
         )
         db.add(history_entry)
         db.commit()
         db.refresh(history_entry)
+    except Exception:
+        # History write should never break the response.
+        response.warnings.append("failed to persist query history")
 
-        return QueryResponse(
-            dataset_id=request.dataset_id,
-            question=question,
-            response=overview.get("response"),
-            insights=overview.get("insights"),
-            table_data=overview.get("table_data"),
-            table_title=overview.get("table_title"),
-            result=overview.get("overview"),
-            history_id=history_entry.id,
-        )
+    return response
 
-    # ── 3. Extract schema ─────────────────────────────────────────────────────
-    schema = get_schema(df)
 
-    # ── 4. Generate code via AI service ──────────────────────────────────────
-    try:
-        generated_code = generate_response(question=question, schema=schema)
-    except LLMError as e:
-        raise HTTPException(status_code=502, detail=str(e)) from e
+def _groq_callable(*, system: str, user: str) -> str:
+    """Small Groq caller used by the analytical handler.
 
-    # ── 5. Safely execute the generated code ─────────────────────────────────
-    try:
-        result = execute_query_code(generated_code, df)
-    except ValueError as e:
-        # Security filter blocked the code
-        raise HTTPException(status_code=422, detail=f"Unsafe code blocked: {e}")
-    except RuntimeError as e:
-        # Execution error
-        raise HTTPException(status_code=500, detail=f"Code execution error: {e}")
+    The analytical handler supports either a Groq client object or a callable.
+    We keep this as a callable to avoid adding a new SDK dependency.
+    """
 
-    # Convert result to a JSON-serializable string for storage
-    result_str = str(result)
+    if not settings.GROQ_API_KEY:
+        raise RuntimeError("GROQ_API_KEY is not configured")
 
-    # ── 6. Persist query + result to history ─────────────────────────────────
-    history_entry = History(
-        dataset_id=request.dataset_id,
-        question=question,
-        answer=result_str,
-    )
-    db.add(history_entry)
-    db.commit()
-    db.refresh(history_entry)
+    headers = {
+        "Authorization": f"Bearer {settings.GROQ_API_KEY}",
+        "Content-Type": "application/json",
+    }
+    payload: dict[str, Any] = {
+        "model": settings.GROQ_MODEL,
+        "messages": [
+            {"role": "system", "content": system},
+            {"role": "user", "content": user},
+        ],
+        "temperature": 0,
+        "max_tokens": 900,
+        # Ask for JSON when supported by Groq.
+        "response_format": {"type": "json_object"},
+    }
 
-    # ── 7. Return response ────────────────────────────────────────────────────
-    return QueryResponse(
-        dataset_id=request.dataset_id,
-        question=question,
-        result=result,
-        history_id=history_entry.id,
+    r = httpx.post(
+        "https://api.groq.com/openai/v1/chat/completions",
+        json=payload,
+        headers=headers,
+        timeout=30,
     )
 
-
-def _is_smalltalk(question: str) -> bool:
-    q = question.strip().lower()
-    if len(q) <= 4 and q in {"hi", "hey", "yo", "sup"}:
-        return True
-    if q in {"hello", "good morning", "good afternoon", "good evening"}:
-        return True
-    if re.fullmatch(r"hi+", q) or re.fullmatch(r"hey+", q):
-        return True
-    return False
-
-
-def _is_overview_question(question: str) -> bool:
-    q = question.strip().lower()
-
-    # Direct phrase matches
-    keywords = [
-        "describe the dataset",
-        "explain the dataset",
-        "dataset explanation",
-        "dataset overview",
-        "give an overview",
-        "summarize the dataset",
-        "summary of the dataset",
-        "what is in this dataset",
-        "tell me about the dataset",
-        "columns and rows",
-        "show me the schema",
-    ]
-    if any(k in q for k in keywords):
-        return True
-
-    # Heuristic: if the user is asking for a dataset-level summary (columns/rows/missing/duplicates),
-    # use the deterministic pandas overview instead of LLM-generated code.
-    intent_words = {"summarize", "summary", "describe", "overview", "explain", "schema", "profile"}
-    dataset_words = {"dataset", "data", "columns", "column", "rows", "row", "missing", "null", "na", "duplicate", "duplicates"}
-    return any(w in q for w in intent_words) and any(w in q for w in dataset_words)
+    # Raise a concise error (analytical handler will catch and return warnings).
+    r.raise_for_status()
+    data = r.json()
+    return data["choices"][0]["message"]["content"]
 
 
 # ─── GET /history/<dataset_id> ────────────────────────────────────────────────

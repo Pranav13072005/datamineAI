@@ -15,6 +15,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import text
 
 from app.api.routes import api_router
+from app.middleware.logging_middleware import LoggingMiddleware
 from app.utils.database import Base, enable_sqlite_fallback, get_engine
 from app.utils.config import settings
 from app.utils.logging import configure_logging
@@ -75,5 +76,8 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Logs JSON on every response and adds X-Request-ID.
+app.add_middleware(LoggingMiddleware)
 
 app.include_router(api_router)

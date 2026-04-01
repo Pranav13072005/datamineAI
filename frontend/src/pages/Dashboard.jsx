@@ -3,6 +3,7 @@ import { useParams, useNavigate } from 'react-router-dom';
 import { ArrowLeft, Share2 } from 'lucide-react';
 import {
   QueryBox,
+  QueryResult,
   ResultsTable,
   ChartView,
   InsightsPanel,
@@ -205,8 +206,15 @@ export default function Dashboard() {
 
             {selectedResult && !loading && (
               <>
+                {/* New unified QueryResponse renderer */}
+                {'query_type' in selectedResult || 'answer' in selectedResult ? (
+                  <div className="fade-in">
+                    <QueryResult result={selectedResult} />
+                  </div>
+                ) : null}
+
                 {/* Insights */}
-                {selectedResult.insights && (
+                {!('query_type' in selectedResult || 'answer' in selectedResult) && selectedResult.insights && (
                   <div className="fade-in">
                     <InsightsPanel
                       insights={selectedResult.insights}
@@ -216,7 +224,7 @@ export default function Dashboard() {
                 )}
 
                 {/* Chart */}
-                {selectedResult.chart_data && (
+                {!('query_type' in selectedResult || 'answer' in selectedResult) && selectedResult.chart_data && (
                   <div className="fade-in">
                     <ChartView
                       data={{
@@ -231,7 +239,7 @@ export default function Dashboard() {
                 )}
 
                 {/* Table Results */}
-                {selectedResult.table_data && (
+                {!('query_type' in selectedResult || 'answer' in selectedResult) && selectedResult.table_data && (
                   <div className="fade-in">
                     <ResultsTable
                       data={selectedResult.table_data}
@@ -241,7 +249,8 @@ export default function Dashboard() {
                 )}
 
                 {/* Raw Response (if no structured data) */}
-                {!selectedResult.chart_data &&
+                {!('query_type' in selectedResult || 'answer' in selectedResult) &&
+                  !selectedResult.chart_data &&
                   !selectedResult.table_data &&
                   selectedResult.response && (
                     <div className="card fade-in">

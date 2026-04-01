@@ -9,6 +9,17 @@ export const useQuery = () => {
   const mapBackendResultToUI = useCallback((data) => {
     if (!data || typeof data !== 'object') return data;
 
+    // New QueryResponse shape from backend.
+    if (
+      'answer' in data ||
+      'table' in data ||
+      'chart' in data ||
+      'warnings' in data ||
+      'query_type' in data
+    ) {
+      return data;
+    }
+
     // If backend already returns structured fields, keep them.
     if (data.response || data.table_data || data.chart_data || data.insights) {
       return data;
