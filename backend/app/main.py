@@ -1,0 +1,71 @@
+"""FastAPI application entry point.
+
+Step 1 bootstraps:
+- FastAPI app + CORS
+- PostgreSQL connection via SQLAlchemy
+- SQLAlchemy declarative base
+- /health endpoint
+"""
+
+from contextlib import asynccontextmanager
+import logging
+
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+from sqlalchemy import text
+
+from app.api.routes import api_router
+from app.db.session import get_engine
+from app.utils.config import settings
+from app.utils.logging import configure_logging
+
+
+logger = logging.getLogger(__name__)
+
+
+@asynccontextmanager
+async def lifespan(_: FastAPI):
+    configure_logging()
+
+    logger.info("Starting API", extra={"environment": settings.ENVIRONMENT})
+
+    # Verify live DB connection early.
+    # - In production: fail fast if DB is misconfigured/unreachable.
+    # - In development: log a warning and continue (so you can still hit /docs, etc.).
+    if settings.SQLALCHEMY_DATABASE_URI:
+        try:
+            engine = get_engine()
+            with engine.connect() as conn:
+                conn.execute(text("SELECT 1"))
+            logger.info("Database connection OK")
+        except Exception as exc:
+            if settings.ENVIRONMENT.lower() == "production":
+                logger.exception("Database connection failed during startup")
+                raise
+            logger.warning(
+                "Database connection failed during startup; continuing without DB. error=%s",
+                exc,
+            )
+    else:
+        logger.info("Database not configured; skipping startup DB probe")
+
+    yield
+
+    logger.info("Shutting down API")
+
+
+app = FastAPI(
+    title=settings.PROJECT_NAME,
+    version="0.1.0",
+    lifespan=lifespan,
+)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=settings.CORS_ORIGINS,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+app.include_router(api_router)
