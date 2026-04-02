@@ -1,10 +1,10 @@
 """FastAPI application entry point.
 
-Step 1 bootstraps:
+Bootstraps:
 - FastAPI app + CORS
-- PostgreSQL connection via SQLAlchemy
-- SQLAlchemy declarative base
-- /health endpoint
+- Logging middleware
+- Database connectivity check (dev-friendly)
+- Routers: /health, /datasets, /query, /export/pdf
 """
 
 from contextlib import asynccontextmanager
@@ -14,10 +14,13 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import text
 
-from app.api.routes import api_router
+from app.config import settings
 from app.middleware.logging_middleware import LoggingMiddleware
+from app.routers.datasets import router as datasets_router
+from app.routers.export import router as export_router
+from app.routers.health import router as health_router
+from app.routers.query import router as query_router
 from app.utils.database import Base, enable_sqlite_fallback, get_engine
-from app.utils.config import settings
 from app.utils.logging import configure_logging
 
 
@@ -53,6 +56,13 @@ async def lifespan(_: FastAPI):
 
             enable_sqlite_fallback()
             engine = get_engine()
+            # NOTE: create_all does not migrate existing schemas.
+            # If a previous local SQLite DB exists with an older schema,
+            # queries may fail (e.g. missing columns). In dev fallback mode
+            # we prefer a working API over preserving old local data.
+            if engine.dialect.name == "sqlite":
+                logger.info("Recreating SQLite schema for dev fallback")
+                Base.metadata.drop_all(bind=engine)
             Base.metadata.create_all(bind=engine)
     else:
         logger.info("Database not configured; skipping startup DB probe")
@@ -80,4 +90,7 @@ app.add_middleware(
 # Logs JSON on every response and adds X-Request-ID.
 app.add_middleware(LoggingMiddleware)
 
-app.include_router(api_router)
+app.include_router(health_router)
+app.include_router(datasets_router)
+app.include_router(query_router)
+app.include_router(export_router)

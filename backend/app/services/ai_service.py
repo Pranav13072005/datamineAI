@@ -18,7 +18,7 @@ from typing import Any
 
 import httpx
 
-from app.utils.config import settings
+from app.config import settings
 
 
 class LLMError(RuntimeError):
