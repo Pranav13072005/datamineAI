@@ -21,6 +21,9 @@ export const datasetAPI = {
   // Get a specific dataset
   getById: (datasetId) => apiClient.get(`/datasets/${datasetId}`),
 
+  // Get cached dataset insights
+  getInsights: (datasetId) => apiClient.get(`/datasets/${datasetId}/insights`),
+
   // Delete a dataset
   delete: (datasetId) => apiClient.delete(`/datasets/${datasetId}`),
 };

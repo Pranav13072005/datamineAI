@@ -23,3 +23,12 @@ class DatasetSchema(BaseModel):
     dtypes: dict[str, str]
     sample_rows: list[dict[str, Any]]
     row_count: int
+
+
+class DatasetInsights(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    dataset_id: str
+    status: str  # "ready", "processing", "error"
+    insights: dict[str, Any] | None = None
+    generated_at: datetime | None = None

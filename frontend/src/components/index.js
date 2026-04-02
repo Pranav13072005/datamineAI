@@ -5,3 +5,4 @@ export { default as ResultsTable } from './ResultsTable';
 export { default as ChartView } from './ChartView';
 export { default as InsightsPanel } from './InsightsPanel';
 export { default as QueryResult } from './QueryResult';
+export { default as DataReportCard } from './DataReportCard';

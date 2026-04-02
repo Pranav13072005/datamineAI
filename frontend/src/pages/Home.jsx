@@ -14,7 +14,7 @@ export default function Home() {
 
   useEffect(() => {
     fetchDatasets();
-  }, []);
+  }, [fetchDatasets]);
 
   const handleFileSelect = async (file) => {
     setUploadError(null);
