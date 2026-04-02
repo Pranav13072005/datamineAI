@@ -5,7 +5,7 @@ import logging
 from datetime import datetime, timezone
 from typing import Any
 
-from app.utils.config import settings
+from app.config import settings
 
 
 _RESERVED_ATTRS = {

@@ -14,8 +14,9 @@ from fastapi import HTTPException
 from sqlalchemy import create_engine
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session, declarative_base, sessionmaker
+from sqlalchemy.pool import StaticPool
 
-from app.utils.config import settings
+from app.config import settings
 
 # Declarative base that all ORM models extend
 Base = declarative_base()
@@ -53,13 +54,15 @@ def get_engine() -> Engine:
             )
         database_url = "sqlite:///./local.db"
 
-    engine_kwargs: dict = {
-        "echo": False,
-    }
+    engine_kwargs: dict = {"echo": False}
 
     # SQLite needs this for FastAPI's threaded request model.
+    # For in-memory SQLite we also need StaticPool so all sessions share the same DB.
     if database_url.startswith("sqlite"):
         engine_kwargs["connect_args"] = {"check_same_thread": False}
+
+        if ":memory:" in database_url or "mode=memory" in database_url:
+            engine_kwargs["poolclass"] = StaticPool
     else:
         engine_kwargs["pool_pre_ping"] = True
 
