@@ -3,11 +3,13 @@ export default function DataReportCard({
   status,
   shape,
   missing,
+  highMissing,
   correlations,
   distributionFlags,
   duplicates,
   errorMessage,
   timeoutMessage,
+  generatedAt,
 }) {
   const rows = shape?.rows;
   const cols = shape?.cols;
@@ -36,6 +38,15 @@ export default function DataReportCard({
   const duplicatesPct = typeof duplicates?.pct === 'number' ? duplicates.pct : null;
   const showDuplicateWarning = typeof duplicatesPct === 'number' && duplicatesPct > 1;
 
+  const formatPct = (value, digits = 2) => {
+    if (typeof value !== 'number' || Number.isNaN(value)) return '—';
+    return `${value.toFixed(digits)}%`;
+  };
+
+  const missingColsCount = Array.isArray(missing) ? missing.length : 0;
+  const highMissingColsCount = Array.isArray(highMissing) ? highMissing.length : 0;
+  const showSummaryRow = showReady && (missingColsCount > 0 || duplicatesPct !== null);
+
   return (
     <div className="card-elevated">
       <div className="flex items-start justify-between gap-3 mb-4">
@@ -46,6 +57,9 @@ export default function DataReportCard({
               ? `${rows.toLocaleString()} rows • ${cols.toLocaleString()} cols`
               : 'Generating summary...'}
           </p>
+          {generatedAt instanceof Date && !Number.isNaN(generatedAt.getTime()) ? (
+            <p className="text-[11px] text-slate-500 mt-1">Generated {generatedAt.toLocaleString()}</p>
+          ) : null}
         </div>
 
         {showProcessing ? (
@@ -89,10 +103,43 @@ export default function DataReportCard({
       ) : null}
 
       {showReady ? (
-        <div className="space-y-5">
+        <div className="space-y-4">
+          {showSummaryRow ? (
+            <div className="flex items-start justify-between gap-3 p-3 bg-slate-800/30 border border-slate-700/40 rounded-lg">
+              <div className="text-xs text-slate-300 leading-5">
+                <span className="text-slate-400">Duplicates:</span>{' '}
+                <span className="font-semibold text-slate-200">
+                  {Number(duplicates?.count || 0).toLocaleString()} ({formatPct(duplicatesPct)})
+                </span>
+                <span className="text-slate-500"> • </span>
+                <span className="text-slate-400">Missing cols:</span>{' '}
+                <span className="font-semibold text-slate-200">{missingColsCount.toLocaleString()}</span>
+                {highMissingColsCount > 0 ? (
+                  <>
+                    <span className="text-slate-500"> • </span>
+                    <span className="text-amber-300 font-semibold">{highMissingColsCount.toLocaleString()} high</span>
+                  </>
+                ) : null}
+              </div>
+
+              <span
+                className={
+                  'px-2.5 py-1 rounded-full text-[11px] font-semibold border ' +
+                  (showDuplicateWarning
+                    ? 'bg-amber-500/10 border-amber-500/20 text-amber-300'
+                    : missingColsCount > 0
+                      ? 'bg-slate-700/40 border-slate-600/40 text-slate-200'
+                      : 'bg-emerald-500/10 border-emerald-500/20 text-emerald-300')
+                }
+              >
+                {showDuplicateWarning ? 'Needs attention' : missingColsCount > 0 ? 'Review missing' : 'Looks good'}
+              </span>
+            </div>
+          ) : null}
+
           {showDuplicateWarning ? (
-            <div className="p-4 bg-gradient-to-r from-yellow-500/10 to-amber-500/10 border-l-4 border-yellow-400 rounded-lg">
-              <p className="text-sm text-slate-200">
+            <div className="p-3 bg-gradient-to-r from-yellow-500/10 to-amber-500/10 border-l-4 border-yellow-400 rounded-lg">
+              <p className="text-sm text-slate-200 leading-5">
                 <span className="font-semibold">Duplicate rows detected:</span>{' '}
                 {Number(duplicates?.count || 0).toLocaleString()} ({duplicatesPct.toFixed(2)}%)
               </p>
@@ -112,7 +159,7 @@ export default function DataReportCard({
                     </tr>
                   </thead>
                   <tbody>
-                    {missing.slice(0, 8).map((m) => (
+                    {missing.slice(0, 5).map((m) => (
                       <tr key={m.column} className="border-b border-slate-800/60">
                         <td className="py-2 text-slate-200 truncate max-w-[160px]" title={m.column}>
                           {m.column}
@@ -126,6 +173,32 @@ export default function DataReportCard({
                   </tbody>
                 </table>
               </div>
+
+              {missing.length > 5 ? (
+                <p className="text-[11px] text-slate-500 mt-2">Showing top 5 of {missing.length} columns</p>
+              ) : null}
+
+              {Array.isArray(highMissing) && highMissing.length > 0 ? (
+                <div className="mt-3">
+                  <p className="text-xs text-slate-400 mb-2">High missing (&gt;30%)</p>
+                  <div className="flex flex-wrap gap-2">
+                    {highMissing.slice(0, 8).map((c) => (
+                      <span
+                        key={c}
+                        className="px-2.5 py-1 rounded-full text-xs font-semibold bg-amber-500/10 border border-amber-500/20 text-amber-300"
+                        title={c}
+                      >
+                        {c}
+                      </span>
+                    ))}
+                    {highMissing.length > 8 ? (
+                      <span className="px-2.5 py-1 rounded-full text-xs font-semibold bg-slate-700/40 border border-slate-600/40 text-slate-300">
+                        +{highMissing.length - 8} more
+                      </span>
+                    ) : null}
+                  </div>
+                </div>
+              ) : null}
             </div>
           ) : null}
 
@@ -133,12 +206,12 @@ export default function DataReportCard({
             <div>
               <h3 className="text-sm font-bold text-white mb-2">Top relationships found</h3>
               <div className="space-y-2">
-                {correlations.map((c, idx) => (
+                {correlations.slice(0, 4).map((c, idx) => (
                   <div
                     key={`${c.col_a}-${c.col_b}-${idx}`}
-                    className="p-3 bg-slate-700/30 border border-slate-600/40 rounded-lg"
+                    className="px-3 py-2 bg-slate-700/30 border border-slate-600/40 rounded-lg"
                   >
-                    <p className="text-sm text-slate-200">
+                    <p className="text-sm text-slate-200 leading-5">
                       <span className="font-semibold">{c.col_a}</span> vs{' '}
                       <span className="font-semibold">{c.col_b}</span>
                       <span className="text-slate-400"> • r={typeof c.r === 'number' ? c.r.toFixed(2) : c.r}</span>
@@ -146,6 +219,10 @@ export default function DataReportCard({
                   </div>
                 ))}
               </div>
+
+              {correlations.length > 4 ? (
+                <p className="text-[11px] text-slate-500 mt-2">Showing top 4 of {correlations.length} pairs</p>
+              ) : null}
             </div>
           ) : null}
 
@@ -153,7 +230,7 @@ export default function DataReportCard({
             <div>
               <h3 className="text-sm font-bold text-white mb-2">Flags</h3>
               <div className="flex flex-wrap gap-2">
-                {distributionFlags.map((f, idx) => (
+                {distributionFlags.slice(0, 10).map((f, idx) => (
                   <span
                     key={`${f.column}-${f.flag}-${idx}`}
                     className={`px-2.5 py-1 rounded-full text-xs font-semibold ${pillClassForFlag(f.flag)}`}
@@ -162,6 +239,12 @@ export default function DataReportCard({
                     {f.column}: {f.flag}
                   </span>
                 ))}
+
+                {distributionFlags.length > 10 ? (
+                  <span className="px-2.5 py-1 rounded-full text-xs font-semibold bg-slate-700/40 border border-slate-600/40 text-slate-300">
+                    +{distributionFlags.length - 10} more
+                  </span>
+                ) : null}
               </div>
             </div>
           ) : null}
