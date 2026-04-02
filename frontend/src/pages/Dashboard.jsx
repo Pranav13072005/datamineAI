@@ -199,69 +199,55 @@ export default function Dashboard() {
         </div>
 
         {/* Main Query and Results */}
-        <div className="grid grid-cols-1 lg:grid-cols-4 gap-6">
-          {/* Left: Query Input and History */}
-          <div className="lg:col-span-1 space-y-6 slide-in-left">
-            {/* Data Report Card (after upload: poll until ready/error) */}
-            <DataReportCard
-              status={insightsStatus}
-              shape={datasetInsights?.shape || {
-                rows: currentDataset?.rows,
-                cols: currentDataset?.columns,
-              }}
-              missing={datasetInsights?.missing}
-              correlations={datasetInsights?.correlations}
-              distributionFlags={datasetInsights?.distribution_flags}
-              duplicates={datasetInsights?.duplicates}
-              errorMessage={typeof datasetInsights?.error === 'string' ? datasetInsights.error : null}
-              timeoutMessage={insightsTimeoutMessage}
-              generatedAt={insightsGeneratedAt}
-            />
-
-            {/* Query Section */}
-            <div className="card-elevated">
-              <div className="flex items-center gap-2 mb-4">
-                <div className="w-2 h-2 rounded-full bg-blue-400"></div>
-                <h2 className="text-lg font-bold text-white">Query Assistant</h2>
+        <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
+          {/* Main: Centered Query Assistant + Results */}
+          <div className="lg:col-span-9 lg:order-2 order-1 space-y-6 slide-in-right">
+            {/* Centered Query Assistant (GPT-style) */}
+            <div className="card-elevated max-w-3xl mx-auto">
+              <div className="flex items-start justify-between gap-4 mb-4">
+                <div>
+                  <h2 className="text-xl font-bold text-white tracking-tight">
+                    Ready for your questions
+                  </h2>
+                  <p className="text-slate-400 text-sm mt-1 max-w-2xl">
+                    Ask anything about this dataset — get summaries, charts, and table results.
+                  </p>
+                </div>
+                <span className="px-2.5 py-1 rounded-full text-xs font-semibold bg-blue-500/10 border border-blue-500/20 text-blue-300">
+                  Query
+                </span>
               </div>
+
+              {!selectedResult && !loading ? (
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-3 mb-4">
+                  <div className="p-3 rounded-xl bg-slate-800/40 border border-slate-700/50 text-left hover:bg-slate-800/60 transition-colors cursor-default">
+                    <p className="text-[11px] font-bold text-blue-400 uppercase tracking-wider mb-1 flex items-center gap-2">
+                      <span className="w-1.5 h-1.5 rounded-full bg-blue-400" /> Trends
+                    </p>
+                    <p className="text-slate-300 font-medium text-sm">"Show me sales over time by region"</p>
+                  </div>
+                  <div className="p-3 rounded-xl bg-slate-800/40 border border-slate-700/50 text-left hover:bg-slate-800/60 transition-colors cursor-default">
+                    <p className="text-[11px] font-bold text-purple-400 uppercase tracking-wider mb-1 flex items-center gap-2">
+                      <span className="w-1.5 h-1.5 rounded-full bg-purple-400" /> Insights
+                    </p>
+                    <p className="text-slate-300 font-medium text-sm">"What are the top 5 performing products?"</p>
+                  </div>
+                </div>
+              ) : null}
+
               <QueryBox
                 onSubmit={handleQuerySubmit}
                 loading={loading}
                 disabled={!currentDataset}
               />
+
+              <p className="text-[11px] text-slate-500 mt-3">
+                Tip: try asking for a chart ("plot", "trend", "compare").
+              </p>
             </div>
 
-            {/* Query History */}
-            {history.length > 0 && (
-              <div className="card-elevated h-fit">
-                <div className="flex items-center gap-2 mb-4">
-                  <div className="w-2 h-2 rounded-full bg-purple-400"></div>
-                  <h3 className="text-lg font-bold text-white">Recent Queries</h3>
-                </div>
-                <div className="space-y-2 max-h-80 overflow-y-auto pr-2 custom-scrollbar">
-                  {history.slice(0, 10).map((item, idx) => (
-                    <button
-                      key={idx}
-                      onClick={() => setSelectedResult(item.result)}
-                      className={`w-full p-3 text-left text-sm rounded-lg transition-all transform ${
-                        selectedResult === item.result
-                          ? 'bg-blue-500/30 border border-blue-500/60 scale-105'
-                          : 'bg-slate-700/40 hover:bg-slate-700/60 border border-slate-600/40 hover:border-slate-500/60'
-                      }`}
-                    >
-                      <p className="text-slate-200 line-clamp-2 font-medium">{item.question}</p>
-                      <p className="text-xs text-slate-400 mt-2">
-                        {item.timestamp.toLocaleTimeString()}
-                      </p>
-                    </button>
-                  ))}
-                </div>
-              </div>
-            )}
-          </div>
+            {/* Results / Errors */}
 
-          {/* Right: Results Display */}
-          <div className="lg:col-span-3 space-y-6 slide-in-right">
             {error && (
               <div className="alert-error fade-in flex items-center gap-3">
                 <span className="text-xl">❌</span>
@@ -343,27 +329,53 @@ export default function Dashboard() {
                   )}
               </>
             )}
+          </div>
 
-            {!selectedResult && !loading && (
-              <div className="card-elevated text-center py-24 fade-in flex flex-col items-center justify-center border-dashed border-2 border-slate-700">
-                <div className="w-20 h-20 mb-6 rounded-2xl bg-gradient-to-tr from-blue-500/20 to-cyan-500/20 border border-blue-500/20 flex items-center justify-center shadow-inner">
-                  <span className="text-4xl filter drop-shadow-md">✨</span>
+          {/* Left Rail: Quick Glance + History */}
+          <div className="lg:col-span-3 lg:order-1 order-2 space-y-6 slide-in-left">
+            {/* Data Report Card (after upload: poll until ready/error) */}
+            <div className="max-w-sm lg:max-w-none">
+              <DataReportCard
+                status={insightsStatus}
+                shape={datasetInsights?.shape || {
+                  rows: currentDataset?.rows,
+                  cols: currentDataset?.columns,
+                }}
+                missing={datasetInsights?.missing}
+                highMissing={datasetInsights?.high_missing}
+                correlations={datasetInsights?.correlations}
+                distributionFlags={datasetInsights?.distribution_flags}
+                duplicates={datasetInsights?.duplicates}
+                errorMessage={typeof datasetInsights?.error === 'string' ? datasetInsights.error : null}
+                timeoutMessage={insightsTimeoutMessage}
+                generatedAt={insightsGeneratedAt}
+              />
+            </div>
+
+            {/* Query History */}
+            {history.length > 0 && (
+              <div className="card-elevated h-fit">
+                <div className="flex items-center gap-2 mb-4">
+                  <div className="w-2 h-2 rounded-full bg-purple-400"></div>
+                  <h3 className="text-lg font-bold text-white">Recent Queries</h3>
                 </div>
-                <h2 className="text-2xl font-bold text-white mb-2 tracking-tight">
-                  Ready for your questions
-                </h2>
-                <p className="text-slate-400 text-base max-w-md mx-auto mb-8">
-                  Type a question in the assistant panel to instantly generate AI insights, dynamic charts, and data tables.
-                </p>
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-4 w-full max-w-xl">
-                  <div className="p-4 rounded-xl bg-slate-800/40 border border-slate-700/50 text-left hover:bg-slate-800/60 transition-colors cursor-default">
-                    <p className="text-xs font-bold text-blue-400 uppercase tracking-wider mb-2 flex items-center gap-2"><div className="w-1.5 h-1.5 rounded-full bg-blue-400"></div> Trends</p>
-                    <p className="text-slate-300 font-medium">"Show me sales over time by region"</p>
-                  </div>
-                  <div className="p-4 rounded-xl bg-slate-800/40 border border-slate-700/50 text-left hover:bg-slate-800/60 transition-colors cursor-default">
-                    <p className="text-xs font-bold text-purple-400 uppercase tracking-wider mb-2 flex items-center gap-2"><div className="w-1.5 h-1.5 rounded-full bg-purple-400"></div> Insights</p>
-                    <p className="text-slate-300 font-medium">"What are the top 5 performing products?"</p>
-                  </div>
+                <div className="space-y-2 max-h-80 overflow-y-auto pr-2 custom-scrollbar">
+                  {history.slice(0, 10).map((item, idx) => (
+                    <button
+                      key={idx}
+                      onClick={() => setSelectedResult(item.result)}
+                      className={`w-full p-3 text-left text-sm rounded-lg transition-all transform ${
+                        selectedResult === item.result
+                          ? 'bg-blue-500/30 border border-blue-500/60 scale-105'
+                          : 'bg-slate-700/40 hover:bg-slate-700/60 border border-slate-600/40 hover:border-slate-500/60'
+                      }`}
+                    >
+                      <p className="text-slate-200 line-clamp-2 font-medium">{item.question}</p>
+                      <p className="text-xs text-slate-400 mt-2">
+                        {item.timestamp.toLocaleTimeString()}
+                      </p>
+                    </button>
+                  ))}
                 </div>
               </div>
             )}
