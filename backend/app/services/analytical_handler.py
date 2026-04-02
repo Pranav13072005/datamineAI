@@ -923,7 +923,12 @@ def _sandbox_worker(code: str, df: pd.DataFrame, out_q: Any) -> None:
 
     try:
         from RestrictedPython import compile_restricted  # type: ignore
-        from RestrictedPython.Guards import guarded_getattr, guarded_getitem, safe_builtins  # type: ignore
+        from RestrictedPython.Guards import guarded_getitem, safe_builtins  # type: ignore
+        try:
+            from RestrictedPython.Guards import guarded_getattr  # type: ignore
+        except Exception:  # pragma: no cover
+            # RestrictedPython versions differ: some expose safer_getattr instead.
+            from RestrictedPython.Guards import safer_getattr as guarded_getattr  # type: ignore
         from RestrictedPython.Eval import default_guarded_getiter  # type: ignore
     except Exception as e:
         out_q.put({"ok": False, "result": None, "warnings": [f"RestrictedPython missing: {e}"]})

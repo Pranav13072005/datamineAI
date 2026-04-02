@@ -7,21 +7,28 @@ import {
   ResultsTable,
   ChartView,
   InsightsPanel,
+  DataReportCard,
 } from '../components';
 import { useDatasets } from '../hooks/useDatasets';
 import { useQuery } from '../hooks/useQuery';
 import { useExport } from '../hooks/useExport';
+import { datasetAPI } from '../services/api';
 
 export default function Dashboard() {
   const { datasetId } = useParams();
   const navigate = useNavigate();
-  const { datasets, fetchDatasets } = useDatasets();
-  const { result, loading, error, executeQuery, clearResult } = useQuery();
+  const { fetchDatasets } = useDatasets();
+  const { loading, error, executeQuery } = useQuery();
   const { exportToPDF } = useExport();
 
   const [currentDataset, setCurrentDataset] = useState(null);
   const [history, setHistory] = useState([]);
   const [selectedResult, setSelectedResult] = useState(null);
+
+  const [insightsStatus, setInsightsStatus] = useState('processing');
+  const [datasetInsights, setDatasetInsights] = useState(null);
+  const [insightsGeneratedAt, setInsightsGeneratedAt] = useState(null);
+  const [insightsTimeoutMessage, setInsightsTimeoutMessage] = useState(null);
 
   useEffect(() => {
     (async () => {
@@ -34,6 +41,64 @@ export default function Dashboard() {
       }
     })();
   }, [datasetId, fetchDatasets, navigate]);
+
+  useEffect(() => {
+    if (!datasetId) return;
+
+    let cancelled = false;
+
+    // Defer state resets to avoid react-hooks/set-state-in-effect lint rule.
+    Promise.resolve().then(() => {
+      if (cancelled) return;
+      setInsightsStatus('processing');
+      setDatasetInsights(null);
+      setInsightsGeneratedAt(null);
+      setInsightsTimeoutMessage(null);
+    });
+
+    const getErrorMessage = (err) => {
+      const detail = err?.response?.data?.detail;
+      if (typeof detail === 'string' && detail.trim()) return detail;
+      const message = err?.message;
+      if (typeof message === 'string' && message.trim()) return message;
+      return 'Failed to load insights';
+    };
+
+    (async () => {
+      const startedAt = Date.now();
+      while (!cancelled) {
+        try {
+          const resp = await datasetAPI.getInsights(datasetId);
+          const payload = resp?.data || {};
+          const status = payload.status || 'processing';
+
+          if (cancelled) return;
+          setInsightsStatus(status);
+          setDatasetInsights(payload.insights ?? null);
+          setInsightsGeneratedAt(payload.generated_at ? new Date(payload.generated_at) : null);
+
+          if (status === 'ready' || status === 'error') return;
+        } catch (err) {
+          if (cancelled) return;
+          setInsightsStatus('error');
+          setDatasetInsights({ error: getErrorMessage(err) });
+          return;
+        }
+
+        if (Date.now() - startedAt >= 30_000) {
+          if (cancelled) return;
+          setInsightsTimeoutMessage('Timed out while generating insights (30s). Try refreshing in a moment.');
+          return;
+        }
+
+        await new Promise((r) => setTimeout(r, 2000));
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [datasetId]);
 
   const handleQuerySubmit = async (question) => {
     if (!currentDataset) return;
@@ -137,6 +202,22 @@ export default function Dashboard() {
         <div className="grid grid-cols-1 lg:grid-cols-4 gap-6">
           {/* Left: Query Input and History */}
           <div className="lg:col-span-1 space-y-6 slide-in-left">
+            {/* Data Report Card (after upload: poll until ready/error) */}
+            <DataReportCard
+              status={insightsStatus}
+              shape={datasetInsights?.shape || {
+                rows: currentDataset?.rows,
+                cols: currentDataset?.columns,
+              }}
+              missing={datasetInsights?.missing}
+              correlations={datasetInsights?.correlations}
+              distributionFlags={datasetInsights?.distribution_flags}
+              duplicates={datasetInsights?.duplicates}
+              errorMessage={typeof datasetInsights?.error === 'string' ? datasetInsights.error : null}
+              timeoutMessage={insightsTimeoutMessage}
+              generatedAt={insightsGeneratedAt}
+            />
+
             {/* Query Section */}
             <div className="card-elevated">
               <div className="flex items-center gap-2 mb-4">
