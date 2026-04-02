@@ -21,6 +21,9 @@ def classify_query(question: str, schema: dict) -> str:
     Returns one of:
     - "descriptive": summarize/describe/overview/schema-style questions
     - "smalltalk": greetings/thanks/identity questions
+    - "anomaly": anomaly/outlier detection questions
+    - "clustering": clustering/segmentation questions
+    - "forecast": forecasting/prediction/time-trend questions
     - "analytical": anything requiring computation/comparison (default)
 
     Notes:
@@ -49,6 +52,33 @@ def classify_query(question: str, schema: dict) -> str:
     )
     if any(p in q_norm for p in smalltalk_phrases):
         return "smalltalk"
+
+    # ML-focused intents (deterministic, keyword-based)
+    # Check these early so they override generic analytical phrases like "trend".
+    if (
+        any(t.startswith("anomal") for t in toks)
+        or any(t.startswith("outlier") for t in toks)
+        or toks.intersection({"unusual", "weird", "strange"})
+    ):
+        return "anomaly"
+
+    if (
+        any(t.startswith("cluster") for t in toks)
+        or any(t.startswith("group") for t in toks)
+        or any(t.startswith("segment") for t in toks)
+        or "similar" in toks
+        or "similar rows" in q_norm
+    ):
+        return "clustering"
+
+    if (
+        any(t.startswith("forecast") for t in toks)
+        or any(t.startswith("predict") for t in toks)
+        or "next month" in q_norm
+        or "future" in toks
+        or "trend" in toks
+    ):
+        return "forecast"
 
     # Descriptive / dataset overview
     descriptive_phrases = (

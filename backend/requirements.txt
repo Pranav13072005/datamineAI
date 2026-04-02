@@ -15,3 +15,5 @@ openpyxl
 pytest
 pytest-asyncio
 RestrictedPython
+scikit-learn
+statsmodels

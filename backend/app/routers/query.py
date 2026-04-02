@@ -15,6 +15,7 @@ from app.schemas.query import QueryResponse
 from app.services.analytical_handler import handle_analytical
 from app.services.dataset_service import get_schema, load_dataset
 from app.services.descriptive_handler import handle_descriptive
+from app.services.ml_handler import handle_ml_query
 from app.services.query_classifier import classify_query
 from app.utils.database import get_db
 
@@ -69,6 +70,8 @@ async def query_dataset(request: QueryRequest, db: Session = Depends(get_db)):
         )
     elif query_type == "descriptive":
         response = handle_descriptive(df, question)
+    elif query_type in {"anomaly", "clustering", "forecast"}:
+        response = handle_ml_query(query_type, question, getattr(dataset, "fact_cache", None))
     else:
         response = handle_analytical(df, question, _groq_callable)
 
