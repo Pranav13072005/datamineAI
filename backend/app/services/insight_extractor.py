@@ -6,6 +6,8 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
+from app.services.ml_models import cluster_dataset, detect_anomalies, forecast_series
+
 
 def extract_insights(df: pd.DataFrame) -> dict[str, Any]:
     """Compute fast, JSON-serialisable dataset insights.
@@ -167,6 +169,23 @@ def extract_insights(df: pd.DataFrame) -> dict[str, Any]:
     # Sample rows (first 5)
     sample_rows = df.head(5).where(df.head(5).notna(), None).to_dict(orient="records")
 
+    # ML pre-computations (never raise; store skipped/error payloads)
+    ml: dict[str, Any] = {}
+    try:
+        ml["anomalies"] = detect_anomalies(df)
+    except Exception as exc:
+        ml["anomalies"] = {"skipped": True, "reason": f"detect_anomalies failed: {exc}"}
+
+    try:
+        ml["clusters"] = cluster_dataset(df)
+    except Exception as exc:
+        ml["clusters"] = {"skipped": True, "reason": f"cluster_dataset failed: {exc}"}
+
+    try:
+        ml["forecast"] = forecast_series(df)
+    except Exception as exc:
+        ml["forecast"] = {"skipped": True, "reason": f"forecast_series failed: {exc}"}
+
     result: dict[str, Any] = {
         "shape": {"rows": int(nrows), "cols": int(ncols)},
         "missing": missing,
@@ -176,6 +195,7 @@ def extract_insights(df: pd.DataFrame) -> dict[str, Any]:
         "distribution_flags": distribution_flags,
         "numeric_summary": numeric_summary,
         "sample_rows": sample_rows,
+        "ml": ml,
     }
 
     return _json_safe(result)

@@ -96,7 +96,15 @@ class QueryResponse(BaseModel):
     chart: Optional[ChartSpec] = None
     insights: list[str] = Field(default_factory=list)
     warnings: list[str] = Field(default_factory=list)
-    query_type: Literal["analytical", "descriptive", "smalltalk", "error"] = "analytical"
+    query_type: Literal[
+        "analytical",
+        "descriptive",
+        "smalltalk",
+        "anomaly",
+        "clustering",
+        "forecast",
+        "error",
+    ] = "analytical"
 
     @field_validator("insights", "warnings", mode="before")
     @classmethod
