@@ -1,0 +1,30 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Environments
+.venv/
+venv/
+.env
+
+# Node / frontend
+node_modules/
+dist/
+
+# OS / editor
+.DS_Store
+Thumbs.db
+
+# Uploaded datasets (generated / user data)
+uploaded_datasets/
+backend/uploaded_datasets/
+frontend/uploaded_datasets/
+
+# VS Code
+.vscode/

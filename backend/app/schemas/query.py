@@ -88,6 +88,14 @@ class ChartSpec(BaseModel):
         return _to_jsonable(v)
 
 
+class RelatedHistoryItem(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    question: str
+    answer_summary: str
+    score: float
+
+
 class QueryResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -96,6 +104,7 @@ class QueryResponse(BaseModel):
     chart: Optional[ChartSpec] = None
     insights: list[str] = Field(default_factory=list)
     warnings: list[str] = Field(default_factory=list)
+    related_history: list[RelatedHistoryItem] = Field(default_factory=list)
     query_type: Literal[
         "analytical",
         "descriptive",
@@ -111,3 +120,5 @@ class QueryResponse(BaseModel):
     @classmethod
     def _lists_jsonable(cls, v: Any) -> Any:
         return _to_jsonable(v)
+
+

@@ -16,7 +16,7 @@ from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session, declarative_base, sessionmaker
 from sqlalchemy.pool import StaticPool
 
-from app.config import settings
+import app.config as config
 
 # Declarative base that all ORM models extend
 Base = declarative_base()
@@ -43,6 +43,7 @@ def enable_sqlite_fallback() -> None:
 
 @lru_cache
 def get_engine() -> Engine:
+    settings = config.get_settings()
     database_url = settings.SQLALCHEMY_DATABASE_URI
 
     if _force_sqlite_fallback:
