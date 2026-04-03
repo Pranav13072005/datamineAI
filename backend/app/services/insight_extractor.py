@@ -6,7 +6,44 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-from app.services.ml_models import cluster_dataset, detect_anomalies, forecast_series
+
+def _json_safe(obj: Any) -> Any:
+    """Recursively convert objects to JSON-safe Python primitives."""
+
+    if obj is None:
+        return None
+
+    # Pandas missing scalars (NaT/NA) and numpy NaN
+    if obj is pd.NA:
+        return None
+    if isinstance(obj, float) and np.isnan(obj):
+        return None
+    if isinstance(obj, (np.floating, np.integer, np.bool_)):
+        return obj.item()
+    if isinstance(obj, (np.ndarray,)):
+        return [_json_safe(x) for x in obj.tolist()]
+    if isinstance(obj, (pd.Timestamp, datetime)):
+        # ISO 8601
+        return obj.isoformat()
+    if isinstance(obj, (date,)):
+        return obj.isoformat()
+    if isinstance(obj, (bytes, bytearray)):
+        return obj.decode("utf-8", errors="replace")
+
+    if isinstance(obj, dict):
+        return {str(k): _json_safe(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple, set)):
+        return [_json_safe(v) for v in obj]
+
+    # Python built-in primitives
+    if isinstance(obj, (str, int, bool)):
+        return obj
+    if isinstance(obj, float):
+        # Already handled NaN above
+        return float(obj)
+
+    # Fallback: stringify unknown types to preserve serialisability
+    return str(obj)
 
 
 def extract_insights(df: pd.DataFrame) -> dict[str, Any]:
@@ -16,44 +53,11 @@ def extract_insights(df: pd.DataFrame) -> dict[str, Any]:
     - Uses vectorized pandas operations only (no row-wise loops).
     - Designed to run quickly on ~100k rows; most work is O(n_rows * n_cols)
       and correlations are O(n_numeric_cols^2).
+
+    This function intentionally avoids heavy ML computations so the UI can
+    show a "quick glance" without timing out. ML outputs are computed
+    separately via `compute_ml_insights`.
     """
-
-    def _json_safe(obj: Any) -> Any:
-        """Recursively convert objects to JSON-safe Python primitives."""
-        if obj is None:
-            return None
-
-        # Pandas missing scalars (NaT/NA) and numpy NaN
-        if obj is pd.NA:
-            return None
-        if isinstance(obj, float) and np.isnan(obj):
-            return None
-        if isinstance(obj, (np.floating, np.integer, np.bool_)):
-            return obj.item()
-        if isinstance(obj, (np.ndarray,)):
-            return [_json_safe(x) for x in obj.tolist()]
-        if isinstance(obj, (pd.Timestamp, datetime)):
-            # ISO 8601
-            return obj.isoformat()
-        if isinstance(obj, (date,)):
-            return obj.isoformat()
-        if isinstance(obj, (bytes, bytearray)):
-            return obj.decode("utf-8", errors="replace")
-
-        if isinstance(obj, dict):
-            return {str(k): _json_safe(v) for k, v in obj.items()}
-        if isinstance(obj, (list, tuple, set)):
-            return [_json_safe(v) for v in obj]
-
-        # Python built-in primitives
-        if isinstance(obj, (str, int, bool)):
-            return obj
-        if isinstance(obj, float):
-            # Already handled NaN above
-            return float(obj)
-
-        # Fallback: stringify unknown types to preserve serialisability
-        return str(obj)
 
     nrows, ncols = df.shape
 
@@ -166,10 +170,29 @@ def extract_insights(df: pd.DataFrame) -> dict[str, Any]:
                 }
             )
 
-    # Sample rows (first 5)
-    sample_rows = df.head(5).where(df.head(5).notna(), None).to_dict(orient="records")
+    result: dict[str, Any] = {
+        "shape": {"rows": int(nrows), "cols": int(ncols)},
+        "missing": missing,
+        "high_missing": high_missing,
+        "duplicates": {"count": int(dup_count), "pct": float(dup_pct)},
+        "correlations": correlations,
+        "distribution_flags": distribution_flags,
+        "numeric_summary": numeric_summary,
+    }
 
-    # ML pre-computations (never raise; store skipped/error payloads)
+    return _json_safe(result)
+
+
+def compute_ml_insights(df: pd.DataFrame) -> dict[str, Any]:
+    """Compute ML outputs for a dataset.
+
+    This is separated from `extract_insights` so quick insights can be returned
+    promptly. Never raises; failures are captured as skipped payloads.
+    """
+
+    # Keep imports local so the "quick glance" path doesn't pay for heavy deps.
+    from app.services.ml_models import cluster_dataset, detect_anomalies, forecast_series
+
     ml: dict[str, Any] = {}
     try:
         ml["anomalies"] = detect_anomalies(df)
@@ -186,16 +209,4 @@ def extract_insights(df: pd.DataFrame) -> dict[str, Any]:
     except Exception as exc:
         ml["forecast"] = {"skipped": True, "reason": f"forecast_series failed: {exc}"}
 
-    result: dict[str, Any] = {
-        "shape": {"rows": int(nrows), "cols": int(ncols)},
-        "missing": missing,
-        "high_missing": high_missing,
-        "duplicates": {"count": int(dup_count), "pct": float(dup_pct)},
-        "correlations": correlations,
-        "distribution_flags": distribution_flags,
-        "numeric_summary": numeric_summary,
-        "sample_rows": sample_rows,
-        "ml": ml,
-    }
-
-    return _json_safe(result)
+    return _json_safe(ml)

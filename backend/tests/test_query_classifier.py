@@ -16,6 +16,8 @@ from app.services.query_classifier import classify_query
         ("show schema", "descriptive"),
         ("which product sold most", "analytical"),
         ("Compare average sentiment by month", "analytical"),
+        ("which two columns are related?", "correlation"),
+        ("show correlation between sales and month", "correlation"),
     ],
 )
 def test_classify_query_basic(question: str, expected: str) -> None:

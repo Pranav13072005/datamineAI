@@ -18,6 +18,10 @@ import traceback
 from io import StringIO
 from typing import Any
 
+from datetime import date, datetime
+
+import uuid
+
 import numpy as np
 import pandas as pd
 
@@ -62,12 +66,195 @@ def delete_dataset_file(dataset_id: str) -> None:
         os.remove(path)
 
 
+def find_related_datasets(dataset_id: str, threshold: float = 0.85) -> list[dict[str, Any]]:
+    """Find datasets with semantically similar columns.
+
+    Uses pgvector cosine similarity on `column_registry.embedding` and groups matches by
+    related dataset.
+
+    Returns empty list if not running on Postgres/pgvector or if the dataset_id is invalid.
+    """
+
+    try:
+        dataset_uuid = uuid.UUID(dataset_id)
+    except Exception:
+        return []
+
+    # Keep imports local so this module stays light for non-Postgres setups.
+    from sqlalchemy import text
+
+    from app.utils.database import get_engine
+
+    engine = get_engine()
+    if engine.dialect.name != "postgresql":
+        return []
+
+    # How many nearest neighbors to consider per local column.
+    per_column = 5
+
+    stmt = text(
+        """
+        WITH local_cols AS (
+            SELECT
+                column_name AS local_col,
+                embedding
+            FROM column_registry
+            WHERE dataset_id = :dataset_id
+              AND embedding IS NOT NULL
+        ),
+        matches AS (
+            SELECT
+                l.local_col,
+                m.dataset_id AS related_dataset_id,
+                m.column_name AS remote_col,
+                1 - (m.embedding <=> l.embedding) AS score
+            FROM local_cols l
+            CROSS JOIN LATERAL (
+                SELECT dataset_id, column_name, embedding
+                FROM column_registry
+                WHERE embedding IS NOT NULL
+                  AND dataset_id <> :dataset_id
+                ORDER BY embedding <=> l.embedding
+                LIMIT :per_column
+            ) m
+        )
+        SELECT
+            matches.related_dataset_id::text AS related_dataset_id,
+            d.name AS related_dataset_name,
+            matches.local_col AS local_col,
+            matches.remote_col AS remote_col,
+            matches.score AS score
+        FROM matches
+        JOIN datasets d ON d.id = matches.related_dataset_id
+        WHERE matches.score >= :threshold
+        ORDER BY matches.related_dataset_id, matches.score DESC;
+        """
+    )
+
+    with engine.connect() as conn:
+        rows = conn.execute(
+            stmt,
+            {
+                "dataset_id": dataset_uuid,
+                "threshold": float(threshold),
+                "per_column": int(per_column),
+            },
+        ).mappings().all()
+
+    grouped: dict[str, dict[str, Any]] = {}
+    for r in rows:
+        related_id = str(r.get("related_dataset_id") or "")
+        if not related_id:
+            continue
+
+        group = grouped.get(related_id)
+        if group is None:
+            group = {
+                "related_dataset_id": related_id,
+                "related_dataset_name": r.get("related_dataset_name"),
+                "matching_columns": [],
+                "_scores": [],
+            }
+            grouped[related_id] = group
+
+        score = r.get("score")
+        score_f = float(score) if score is not None else 0.0
+        group["matching_columns"].append(
+            {
+                "local": str(r.get("local_col") or ""),
+                "remote": str(r.get("remote_col") or ""),
+                "score": float(score_f),
+            }
+        )
+        group["_scores"].append(score_f)
+
+    results: list[dict[str, Any]] = []
+    for group in grouped.values():
+        scores = group.pop("_scores", [])
+        overall = float(sum(scores) / len(scores)) if scores else 0.0
+        results.append(
+            {
+                "related_dataset_id": group["related_dataset_id"],
+                "related_dataset_name": group.get("related_dataset_name"),
+                "matching_columns": group.get("matching_columns", []),
+                "overall_similarity": overall,
+            }
+        )
+
+    # Highest similarity first; tie-break by number of matches.
+    results.sort(
+        key=lambda x: (float(x.get("overall_similarity") or 0.0), len(x.get("matching_columns") or [])),
+        reverse=True,
+    )
+
+    return results
+
+
 def _truncate_value(value: Any, *, max_chars: int) -> Any:
     if value is None:
         return None
+
+    # Pandas/numpy missing scalars (NaN/NA/NaT) are not valid JSON tokens in Postgres JSONB.
+    try:
+        if pd.isna(value):
+            return None
+    except Exception:
+        pass
+
     if isinstance(value, str) and len(value) > max_chars:
         return value[: max_chars - 1] + "…"
     return value
+
+
+def _json_safe(obj: Any) -> Any:
+    """Recursively convert objects to JSON-safe Python primitives.
+
+    In particular, replaces NaN/Inf and pandas missing values with None so that
+    Postgres JSONB inserts never contain invalid JSON tokens.
+    """
+
+    if obj is None:
+        return None
+
+    # Pandas missing scalars and numpy NaN/Inf.
+    if obj is pd.NA:
+        return None
+    if isinstance(obj, float) and (math.isnan(obj) or not math.isfinite(obj)):
+        return None
+    if isinstance(obj, (np.floating, np.integer, np.bool_)):
+        val = obj.item()
+        if isinstance(val, float) and (math.isnan(val) or not math.isfinite(val)):
+            return None
+        return val
+
+    if isinstance(obj, (pd.Timestamp, datetime)):
+        return obj.isoformat()
+    if isinstance(obj, date):
+        return obj.isoformat()
+    if isinstance(obj, (bytes, bytearray)):
+        return obj.decode("utf-8", errors="replace")
+
+    if isinstance(obj, dict):
+        return {str(k): _json_safe(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple, set)):
+        return [_json_safe(v) for v in obj]
+
+    if isinstance(obj, str):
+        return obj
+    if isinstance(obj, (int, bool)):
+        return obj
+    if isinstance(obj, float):
+        # Non-NaN floats are fine.
+        return float(obj)
+
+    # Try pandas-aware missingness as a last resort.
+    try:
+        if pd.isna(obj):
+            return None
+    except Exception:
+        pass
+
+    return str(obj)
 
 
 def get_schema(df: pd.DataFrame, sample_rows: int = 3, *, max_cell_chars: int = 200) -> dict:
@@ -75,16 +262,16 @@ def get_schema(df: pd.DataFrame, sample_rows: int = 3, *, max_cell_chars: int = 
 
     sample = df.head(sample_rows).to_dict(orient="records")
     sanitized_sample = [
-        {k: _truncate_value(v, max_chars=max_cell_chars) for k, v in row.items()}
+        {str(k): _truncate_value(v, max_chars=max_cell_chars) for k, v in row.items()}
         for row in sample
     ]
 
-    return {
+    return _json_safe({
         "columns": df.columns.tolist(),
         "dtypes": {col: str(dtype) for col, dtype in df.dtypes.items()},
         "sample_rows": sanitized_sample,
         "row_count": len(df),
-    }
+    })
 
 
 _DANGEROUS_PATTERNS = [

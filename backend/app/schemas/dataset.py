@@ -32,3 +32,20 @@ class DatasetInsights(BaseModel):
     status: str  # "ready", "processing", "error"
     insights: dict[str, Any] | None = None
     generated_at: datetime | None = None
+
+
+class ColumnSearchResult(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    dataset_id: str
+    dataset_name: str
+    column_name: str
+    description: str
+    similarity_score: float
+
+
+class SearchResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    query: str
+    results: list[ColumnSearchResult]

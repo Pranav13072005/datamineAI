@@ -21,6 +21,7 @@ def classify_query(question: str, schema: dict) -> str:
     Returns one of:
     - "descriptive": summarize/describe/overview/schema-style questions
     - "smalltalk": greetings/thanks/identity questions
+    - "correlation": relationships / correlation between columns
     - "anomaly": anomaly/outlier detection questions
     - "clustering": clustering/segmentation questions
     - "forecast": forecasting/prediction/time-trend questions
@@ -79,6 +80,24 @@ def classify_query(question: str, schema: dict) -> str:
         or "trend" in toks
     ):
         return "forecast"
+
+    # Correlation / relationships between columns
+    # Keep this before descriptive/analytical so questions like
+    # "which two columns are related?" route to the deterministic correlation handler.
+    if (
+        "correlation" in toks
+        or any(t.startswith("correl") for t in toks)
+        or "relationship" in toks
+        or "relationships" in toks
+        or ("related" in toks and ("column" in toks or "columns" in toks))
+        or ("associated" in toks and ("column" in toks or "columns" in toks))
+        or ("linked" in toks and ("column" in toks or "columns" in toks))
+        or "which two columns" in q_norm
+        or "two columns" in q_norm
+        or "most related" in q_norm
+        or "most correlated" in q_norm
+    ):
+        return "correlation"
 
     # Descriptive / dataset overview
     descriptive_phrases = (

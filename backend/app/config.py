@@ -64,6 +64,9 @@ class Settings(BaseSettings):
     # Note: Groq model IDs change over time; this default matches current Groq /models.
     GROQ_MODEL: str = "llama-3.3-70b-versatile"
 
+    # Embeddings / semantic search
+    EMBEDDING_MODEL: str = "all-MiniLM-L6-v2"
+
     # Local storage
     UPLOAD_DIR: str = "uploaded_datasets"
 
