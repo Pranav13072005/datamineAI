@@ -22,8 +22,13 @@ export default function Dashboard() {
   const { exportToPDF } = useExport();
 
   const [currentDataset, setCurrentDataset] = useState(null);
+  const [historyOpen, setHistoryOpen] = useState(false);
+  const [historyLoading, setHistoryLoading] = useState(false);
+  const [historyError, setHistoryError] = useState(null);
   const [history, setHistory] = useState([]);
+  const [selectedHistoryId, setSelectedHistoryId] = useState(null);
   const [selectedResult, setSelectedResult] = useState(null);
+  const [activeQuestion, setActiveQuestion] = useState(null);
 
   const [insightsStatus, setInsightsStatus] = useState('processing');
   const [datasetInsights, setDatasetInsights] = useState(null);
@@ -41,6 +46,45 @@ export default function Dashboard() {
       }
     })();
   }, [datasetId, fetchDatasets, navigate]);
+
+  useEffect(() => {
+    if (!datasetId) return;
+
+    let cancelled = false;
+
+    // Reset UI for the new dataset.
+    Promise.resolve().then(() => {
+      if (cancelled) return;
+      setSelectedResult(null);
+      setSelectedHistoryId(null);
+      setActiveQuestion(null);
+      setHistoryOpen(false);
+      setHistoryError(null);
+    });
+
+    (async () => {
+      setHistoryLoading(true);
+      setHistoryError(null);
+      try {
+        const resp = await datasetAPI.getHistory(datasetId, 20);
+        const rows = Array.isArray(resp?.data) ? resp.data : [];
+        if (cancelled) return;
+        setHistory(rows);
+      } catch (err) {
+        if (cancelled) return;
+        const detail = err?.response?.data?.detail;
+        const msg = (typeof detail === 'string' && detail.trim()) ? detail : (err?.message || 'Failed to load history');
+        setHistoryError(msg);
+        setHistory([]);
+      } finally {
+        if (!cancelled) setHistoryLoading(false);
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [datasetId]);
 
   useEffect(() => {
     if (!datasetId) return;
@@ -104,11 +148,82 @@ export default function Dashboard() {
     if (!currentDataset) return;
 
     try {
-      const queryResult = await executeQuery(currentDataset.id, question);
+      const queryResultRaw = await executeQuery(currentDataset.id, question);
+
+      // If backend `related_history` is empty (common when DB persistence runs in a
+      // background task), derive a best-effort related item from the already-loaded
+      // History list so the UX is visibly working.
+      const normalize = (s) => {
+        const raw = typeof s === 'string' ? s : '';
+        return raw
+          .trim()
+          .toLowerCase()
+          .replace(/[_\-]+/g, ' ')
+          .replace(/[^a-z0-9\s]/g, '')
+          .replace(/\s+/g, ' ');
+      };
+
+      const similarity = (a, b) => {
+        const aa = normalize(a);
+        const bb = normalize(b);
+        if (!aa || !bb) return 0;
+        if (aa === bb) return 1;
+        if (aa.includes(bb) || bb.includes(aa)) return 0.92;
+        const aw = aa.split(' ').filter(Boolean);
+        const bw = bb.split(' ').filter(Boolean);
+        if (!aw.length || !bw.length) return 0;
+        const aset = new Set(aw);
+        let common = 0;
+        for (const w of bw) if (aset.has(w)) common += 1;
+        return common / Math.max(aw.length, bw.length);
+      };
+      const target = normalize(question);
+
+      const backendRelated = Array.isArray(queryResultRaw?.related_history) ? queryResultRaw.related_history : [];
+      let queryResult = queryResultRaw;
+
+      if (!backendRelated.length && Array.isArray(history) && history.length) {
+        let best = null;
+        let bestScore = 0;
+        for (const item of history) {
+          const qText = item?.question;
+          const sc = similarity(qText, target);
+          if (sc > bestScore) {
+            bestScore = sc;
+            best = item;
+          }
+        }
+
+        const match = bestScore >= 0.78 ? best : null;
+        const qh = typeof match?.question === 'string' ? match.question : '';
+        const ah =
+          (typeof match?.answer_summary === 'string' && match.answer_summary.trim())
+            ? match.answer_summary
+            : (typeof match?.response_json?.answer === 'string' ? match.response_json.answer.slice(0, 200) : '');
+
+        if (qh && ah) {
+          queryResult = {
+            ...(queryResultRaw && typeof queryResultRaw === 'object' ? queryResultRaw : {}),
+            related_history: [{ question: qh, answer_summary: ah, score: Number(bestScore.toFixed(3)) }],
+          };
+        }
+      }
+
       setSelectedResult(queryResult);
-      setHistory([
-        { question, result: queryResult, timestamp: new Date() },
-        ...history,
+      setActiveQuestion(question);
+
+      const entryId = `local-${Date.now()}`;
+      setSelectedHistoryId(entryId);
+      setHistory((prev) => [
+        {
+          id: entryId,
+          question,
+          query_type: typeof queryResult?.query_type === 'string' ? queryResult.query_type : 'analytical',
+          created_at: new Date().toISOString(),
+          answer_summary: typeof queryResult?.answer === 'string' ? queryResult.answer.slice(0, 200) : null,
+          response_json: queryResult,
+        },
+        ...(Array.isArray(prev) ? prev : []),
       ]);
     } catch (err) {
       console.error('Query failed:', err);
@@ -121,7 +236,7 @@ export default function Dashboard() {
     try {
       const exportData = {
         dataset_name: currentDataset?.name,
-        query: history[0]?.question,
+        query: activeQuestion || history?.[0]?.question,
         results: selectedResult,
         timestamp: new Date().toISOString(),
       };
@@ -149,6 +264,62 @@ export default function Dashboard() {
       </div>
     );
   }
+
+  const truncateQuestion = (text, maxLen = 60) => {
+    const s = typeof text === 'string' ? text : '';
+    if (s.length <= maxLen) return s;
+    return s.slice(0, Math.max(0, maxLen - 1)) + '…';
+  };
+
+  const formatTimeAgo = (value) => {
+    const dt = value instanceof Date ? value : new Date(value);
+    if (!(dt instanceof Date) || Number.isNaN(dt.getTime())) return '';
+
+    const diffMs = Date.now() - dt.getTime();
+    const diffSec = Math.floor(diffMs / 1000);
+    if (diffSec < 60) return 'just now';
+    const diffMin = Math.floor(diffSec / 60);
+    if (diffMin < 60) return `${diffMin} min ago`;
+    const diffHr = Math.floor(diffMin / 60);
+    if (diffHr < 24) return `${diffHr} hr ago`;
+    const diffDay = Math.floor(diffHr / 24);
+    if (diffDay < 7) return `${diffDay} day${diffDay === 1 ? '' : 's'} ago`;
+    const diffWk = Math.floor(diffDay / 7);
+    if (diffWk < 5) return `${diffWk} week${diffWk === 1 ? '' : 's'} ago`;
+    return dt.toLocaleDateString();
+  };
+
+  const queryTypePillClass = (type) => {
+    const t = (type || '').toString().toLowerCase();
+    if (t === 'analytical') return 'bg-blue-500/10 border border-blue-500/20 text-blue-300';
+    if (t === 'descriptive') return 'bg-purple-500/10 border border-purple-500/20 text-purple-300';
+    if (t === 'smalltalk') return 'bg-slate-700/40 border border-slate-600/40 text-slate-300';
+    if (t === 'anomaly' || t === 'forecast') return 'bg-amber-500/10 border border-amber-500/20 text-amber-300';
+    if (t === 'clustering') return 'bg-emerald-500/10 border border-emerald-500/20 text-emerald-300';
+    if (t === 'correlation') return 'bg-cyan-500/10 border border-cyan-500/20 text-cyan-300';
+    return 'bg-slate-700/40 border border-slate-600/40 text-slate-300';
+  };
+
+  const handleSelectRelatedHistory = (relatedQuestion) => {
+    const q = typeof relatedQuestion === 'string' ? relatedQuestion.trim() : '';
+    if (!q) return;
+
+    setHistoryOpen(true);
+
+    const normalize = (s) => (typeof s === 'string' ? s.trim().toLowerCase() : '');
+    const target = normalize(q);
+    const match = Array.isArray(history)
+      ? history.find((item) => normalize(item?.question) === target)
+      : null;
+
+    const payload = match?.response_json;
+    if (payload && typeof payload === 'object') {
+      setSelectedResult(payload);
+      setActiveQuestion(q);
+      const id = match?.id;
+      setSelectedHistoryId(id ? String(id) : null);
+    }
+  };
 
   return (
     <div className="min-h-screen bg-[#020617] text-slate-200">
@@ -201,7 +372,7 @@ export default function Dashboard() {
         {/* Main Query and Results */}
         <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
           {/* Main: Centered Query Assistant + Results */}
-          <div className="lg:col-span-9 lg:order-2 order-1 space-y-6 slide-in-right">
+          <div className={`${historyOpen ? 'lg:col-span-6' : 'lg:col-span-9'} lg:order-2 order-1 space-y-6 slide-in-right`}>
             {/* Centered Query Assistant (GPT-style) */}
             <div className="card-elevated max-w-3xl mx-auto">
               <div className="flex items-start justify-between gap-4 mb-4">
@@ -213,9 +384,22 @@ export default function Dashboard() {
                     Ask anything about this dataset — get summaries, charts, and table results.
                   </p>
                 </div>
-                <span className="px-2.5 py-1 rounded-full text-xs font-semibold bg-blue-500/10 border border-blue-500/20 text-blue-300">
-                  Query
-                </span>
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setHistoryOpen((v) => !v)}
+                    className={`px-2.5 py-1 rounded-full text-xs font-semibold border transition-colors ${
+                      historyOpen
+                        ? 'bg-purple-500/10 border-purple-500/30 text-purple-200'
+                        : 'bg-slate-800/40 border-slate-700/50 text-slate-300 hover:text-white'
+                    }`}
+                  >
+                    History
+                  </button>
+                  <span className="px-2.5 py-1 rounded-full text-xs font-semibold bg-blue-500/10 border border-blue-500/20 text-blue-300">
+                    Query
+                  </span>
+                </div>
               </div>
 
               {!selectedResult && !loading ? (
@@ -276,7 +460,7 @@ export default function Dashboard() {
                 {/* New unified QueryResponse renderer */}
                 {'query_type' in selectedResult || 'answer' in selectedResult ? (
                   <div className="fade-in">
-                    <QueryResult result={selectedResult} />
+                    <QueryResult result={selectedResult} onSelectRelated={handleSelectRelatedHistory} />
                   </div>
                 ) : null}
 
@@ -331,6 +515,82 @@ export default function Dashboard() {
             )}
           </div>
 
+          {/* Right Panel: History (collapsible) */}
+          {historyOpen ? (
+            <div className="lg:col-span-3 lg:order-3 order-3 space-y-6 slide-in-right">
+              <div className="card-elevated h-fit">
+                <div className="flex items-center justify-between gap-3 mb-4">
+                  <div className="flex items-center gap-2">
+                    <div className="w-2 h-2 rounded-full bg-purple-400"></div>
+                    <h3 className="text-lg font-bold text-white">History</h3>
+                  </div>
+                  <span className="text-[11px] text-slate-500">
+                    {Array.isArray(history) ? history.length : 0}
+                  </span>
+                </div>
+
+                {historyError ? (
+                  <div className="mb-3 p-3 bg-red-500/10 border border-red-500/20 rounded-lg text-red-200 text-sm">
+                    {historyError}
+                  </div>
+                ) : null}
+
+                {historyLoading ? (
+                  <div className="p-4 text-sm text-slate-400">Loading history…</div>
+                ) : null}
+
+                {!historyLoading && (!Array.isArray(history) || history.length === 0) ? (
+                  <div className="p-4 text-sm text-slate-400">
+                    No past queries yet.
+                  </div>
+                ) : null}
+
+                {!historyLoading && Array.isArray(history) && history.length > 0 ? (
+                  <div className="space-y-2 max-h-[520px] overflow-y-auto pr-2 custom-scrollbar">
+                    {history.map((item) => {
+                      const id = (item && typeof item === 'object' && item.id) ? String(item.id) : '';
+                      const q = item?.question;
+                      const qt = item?.query_type;
+                      const createdAt = item?.created_at;
+                      const isSelected = id && selectedHistoryId ? id === selectedHistoryId : false;
+                      return (
+                        <button
+                          key={id || `${q}-${createdAt}`}
+                          onClick={() => {
+                            const payload = item?.response_json;
+                            if (payload && typeof payload === 'object') {
+                              setSelectedResult(payload);
+                              setActiveQuestion(typeof q === 'string' ? q : null);
+                              setSelectedHistoryId(id || null);
+                            }
+                          }}
+                          className={`w-full p-3 text-left text-sm rounded-lg transition-all transform border ${
+                            isSelected
+                              ? 'bg-blue-500/20 border-blue-500/50'
+                              : 'bg-slate-700/30 hover:bg-slate-700/50 border-slate-600/30 hover:border-slate-500/50'
+                          }`}
+                          title={typeof q === 'string' ? q : ''}
+                        >
+                          <div className="flex items-start justify-between gap-2">
+                            <p className="text-slate-200 font-medium text-sm leading-snug">
+                              {truncateQuestion(q)}
+                            </p>
+                            <span className={`shrink-0 px-2 py-0.5 rounded-full text-[10px] font-semibold ${queryTypePillClass(qt)}`}>
+                              {(qt || 'unknown').toString()}
+                            </span>
+                          </div>
+                          <div className="text-[11px] text-slate-500 mt-2">
+                            {formatTimeAgo(createdAt)}
+                          </div>
+                        </button>
+                      );
+                    })}
+                  </div>
+                ) : null}
+              </div>
+            </div>
+          ) : null}
+
           {/* Left Rail: Quick Glance + History */}
           <div className="lg:col-span-3 lg:order-1 order-2 space-y-6 slide-in-left">
             {/* Data Report Card (after upload: poll until ready/error) */}
@@ -352,33 +612,6 @@ export default function Dashboard() {
               />
             </div>
 
-            {/* Query History */}
-            {history.length > 0 && (
-              <div className="card-elevated h-fit">
-                <div className="flex items-center gap-2 mb-4">
-                  <div className="w-2 h-2 rounded-full bg-purple-400"></div>
-                  <h3 className="text-lg font-bold text-white">Recent Queries</h3>
-                </div>
-                <div className="space-y-2 max-h-80 overflow-y-auto pr-2 custom-scrollbar">
-                  {history.slice(0, 10).map((item, idx) => (
-                    <button
-                      key={idx}
-                      onClick={() => setSelectedResult(item.result)}
-                      className={`w-full p-3 text-left text-sm rounded-lg transition-all transform ${
-                        selectedResult === item.result
-                          ? 'bg-blue-500/30 border border-blue-500/60 scale-105'
-                          : 'bg-slate-700/40 hover:bg-slate-700/60 border border-slate-600/40 hover:border-slate-500/60'
-                      }`}
-                    >
-                      <p className="text-slate-200 line-clamp-2 font-medium">{item.question}</p>
-                      <p className="text-xs text-slate-400 mt-2">
-                        {item.timestamp.toLocaleTimeString()}
-                      </p>
-                    </button>
-                  ))}
-                </div>
-              </div>
-            )}
           </div>
         </div>
       </div>

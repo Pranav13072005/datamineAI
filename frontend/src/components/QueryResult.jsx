@@ -26,14 +26,32 @@ function getPlotProps(chart) {
   };
 }
 
-export default function QueryResult({ result }) {
+export default function QueryResult({ result, onSelectRelated }) {
   if (!result || typeof result !== 'object') return null;
+
+  const truncateText = (text, maxLen = 80) => {
+    const s = typeof text === 'string' ? text : '';
+    if (s.length <= maxLen) return s;
+    return s.slice(0, Math.max(0, maxLen - 1)) + '…';
+  };
 
   const answer = typeof result.answer === 'string' ? result.answer : (typeof result.response === 'string' ? result.response : '');
   const table = result.table && typeof result.table === 'object' ? result.table : null;
   const insights = normalizeInsights(result.insights);
   const warnings = Array.isArray(result.warnings) ? result.warnings.filter(Boolean).map(String) : [];
   const chart = result.chart && typeof result.chart === 'object' ? result.chart : null;
+
+  const relatedHistory = Array.isArray(result.related_history)
+    ? result.related_history
+        .filter((item) => item && typeof item === 'object')
+        .map((item) => ({
+          question: typeof item.question === 'string' ? item.question : '',
+          answer_summary: typeof item.answer_summary === 'string' ? item.answer_summary : '',
+          score: typeof item.score === 'number' ? item.score : null,
+        }))
+        .filter((item) => item.question)
+    : [];
+  const topRelated = relatedHistory.length > 0 ? relatedHistory[0] : null;
 
   const showTable = !!(table && Array.isArray(table.columns) && Array.isArray(table.rows));
   const showChart = !!(chart && typeof chart.type === 'string' && chart.type);
@@ -53,6 +71,33 @@ export default function QueryResult({ result }) {
       {answer || insights.length > 0 ? (
         <div className="card fade-in">
           <h3 className="section-title">Answer</h3>
+
+          {topRelated ? (
+            <div className="mt-2 text-xs text-slate-500">
+              <span className="text-slate-500">Based on similar question:</span>{' '}
+              {typeof onSelectRelated === 'function' ? (
+                <button
+                  type="button"
+                  onClick={() => onSelectRelated(topRelated.question)}
+                  className="text-slate-300 underline decoration-slate-600 underline-offset-2 hover:text-slate-200"
+                  title={topRelated.answer_summary ? `${topRelated.question}\n\n${topRelated.answer_summary}` : topRelated.question}
+                >
+                  {truncateText(topRelated.question, 80)}
+                </button>
+              ) : (
+                <span
+                  className="text-slate-300"
+                  title={topRelated.answer_summary ? `${topRelated.question}\n\n${topRelated.answer_summary}` : topRelated.question}
+                >
+                  {truncateText(topRelated.question, 80)}
+                </span>
+              )}
+              {typeof topRelated.score === 'number' && Number.isFinite(topRelated.score) ? (
+                <span className="ml-2 text-slate-600">(match {Math.round(topRelated.score * 100)}%)</span>
+              ) : null}
+            </div>
+          ) : null}
+
           {answer ? (
             <p className="text-slate-300 whitespace-pre-wrap leading-relaxed">
               {answer}

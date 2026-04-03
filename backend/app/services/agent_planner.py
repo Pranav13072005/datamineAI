@@ -30,6 +30,11 @@ Rules:
   - Use 1 step for simple questions, up to 4 steps for complex ones
   - Prefer get_ml_result over run_pandas when the question is about anomalies/clusters/forecast
   - Keep run_pandas code under 10 lines, vectorised only
+    - For run_pandas: DO NOT use any import/from statements. Assume `df` (a pandas DataFrame) and `pd` are already available.
+    - For run_pandas: DO NOT use numpy (no `np`). Use pandas ops only.
+    - For run_pandas: Always set `result` to a pandas DataFrame when you want a table (preferred), or a small dict/list.
+        - If the question asks for a rate (e.g. approval rate), identify a binary outcome column from the schema (common names: Loan_Status, Approved, Is_Approved, Status) and compute rate as mean of an approved boolean/0-1.
+        - If the question asks for buckets/quartiles, use pd.cut/pd.qcut and groupby to produce a small table (bucket + metric).
   - If the question cannot be answered with these tools, use [{\"tool\": \"describe\", \"args\": {}, \"purpose\": \"explain what data is available\"}]"""
 
 
@@ -45,7 +50,7 @@ Respond ONLY with valid JSON matching this schema:
 """
 
 
-def plan_query(question: str, dataset_schema: dict, fact_cache: dict) -> list[dict]:
+def plan_query(question: str, dataset_schema: dict, fact_cache: dict, dataset_id: str | None = None) -> list[dict]:
     """Generate a tool plan for answering a dataset question.
 
     Makes exactly one Groq LLM call and expects a JSON array response.
@@ -67,21 +72,89 @@ def plan_query(question: str, dataset_schema: dict, fact_cache: dict) -> list[di
     if not settings.GROQ_API_KEY:
         return _FALLBACK
 
+    schema_obj = dataset_schema or {}
+    cache_obj: dict[str, Any]
+    if isinstance(fact_cache, dict):
+        cache_obj = fact_cache
+    else:
+        cache_obj = {}
+
+    related_history: list[dict[str, Any]] = []
+    if dataset_id:
+        try:
+            from app.services.history_service import search_history
+
+            hits = search_history(q, dataset_id)
+            if isinstance(hits, list) and hits:
+                for h in hits:
+                    if not isinstance(h, dict):
+                        continue
+                    try:
+                        score = float(h.get("score") or 0.0)
+                    except Exception:
+                        score = 0.0
+                    related_history.append(
+                        {
+                            "question": str(h.get("question") or ""),
+                            "answer_summary": str(h.get("answer_summary") or ""),
+                            "score": score,
+                        }
+                    )
+        except Exception:
+            related_history = []
+
+    # Stash for downstream use (router attaches it to QueryResponse).
+    try:
+        cache_obj["related_history"] = related_history
+    except Exception:
+        pass
+
+    # Avoid duplicating related history in the user payload (it is already injected into the system prompt).
+    try:
+        fact_cache_for_llm = dict(cache_obj)
+        fact_cache_for_llm.pop("related_history", None)
+    except Exception:
+        fact_cache_for_llm = cache_obj
+
     user_payload = {
         "question": q,
-        "dataset_schema": dataset_schema or {},
-        "fact_cache": fact_cache or {},
+        "fact_cache": fact_cache_for_llm,
     }
 
     try:
         user_content = json.dumps(user_payload, ensure_ascii=False, default=str, separators=(",", ":"))
     except Exception:
-        # If schema/cache contains unserializable values despite default=str,
-        # don't crash; fall back.
         return _FALLBACK
 
+    # Build system prompt dynamically so schema + relevant history are available to the planner.
     try:
-        raw_text = _call_groq(system=_SYSTEM_PROMPT, user=user_content)
+        schema_json = json.dumps(schema_obj, ensure_ascii=False, default=str, separators=(",", ":"))
+    except Exception:
+        schema_json = "{}"
+
+    system_prompt = f"{_SYSTEM_PROMPT}\n\nDataset schema:\n{schema_json}"
+
+    if related_history:
+        lines = []
+        for h in related_history:
+            qh = str(h.get("question") or "").strip()
+            ah = str(h.get("answer_summary") or "").strip()
+            try:
+                sc = float(h.get("score") or 0.0)
+            except Exception:
+                sc = 0.0
+            if not qh or not ah:
+                continue
+            lines.append(f"- {qh}: {ah} (similarity: {sc:.3f})")
+
+        if lines:
+            system_prompt += (
+                "\n\nRelevant findings from previous analyses of this dataset:\n"
+                + "\n".join(lines)
+            )
+
+    try:
+        raw_text = _call_groq(system=system_prompt, user=user_content)
     except Exception:
         return _FALLBACK
 
@@ -112,7 +185,8 @@ def execute_plan(plan: list[dict], df: pd.DataFrame, fact_cache: dict) -> list[d
         try:
             if tool == "run_pandas":
                 code = _step_get_str(args, "code")
-                r = code_executor.execute_pandas_code(code or "", df)
+                code_s = _sanitize_pandas_code(code or "")
+                r = code_executor.execute_pandas_code(code_s, df)
                 if isinstance(r, dict):
                     out["result"] = r.get("result")
                     out["error"] = r.get("error")
@@ -216,10 +290,12 @@ def synthesise_results(question: str, plan_results: list[dict], schema: dict) ->
     if not settings.GROQ_API_KEY:
         return _basic_fallback_response(q, results)
 
+    # Keep the prompt small and consistently JSON-friendly.
+    # The full results are still used locally for table/chart selection.
     user_payload = {
         "question": q,
         "schema": schema_obj,
-        "plan_results": results,
+        "plan_results": _compact_plan_results_for_llm(results),
     }
 
     try:
@@ -228,9 +304,12 @@ def synthesise_results(question: str, plan_results: list[dict], schema: dict) ->
         return _basic_fallback_response(q, results)
 
     try:
+        # Avoid relying on response_format support; enforce JSON via prompt + strict parsing.
         raw_text = _call_groq(system=_SYNTHESIS_SYSTEM_PROMPT, user=user_content)
-    except Exception:
-        return _basic_fallback_response(q, results)
+    except Exception as exc:
+        resp = _basic_fallback_response(q, results)
+        resp.warnings.append(f"synthesis: groq call failed: {exc.__class__.__name__}: {exc}")
+        return resp
 
     parsed = _parse_synthesis_json(raw_text)
     if parsed is None:
@@ -245,8 +324,21 @@ def synthesise_results(question: str, plan_results: list[dict], schema: dict) ->
     table_from_tool = parsed["table_from_tool"]
 
     warnings: list[str] = []
+    warnings.extend(_step_error_warnings(results))
     table, table_warnings = _select_table_from_results(results, table_from_tool)
     warnings.extend(table_warnings)
+
+    # If the model didn't produce usable insights, derive a few deterministically
+    # from the selected table.
+    if not insights:
+        insights = _derive_insights_from_table(table)
+    elif len(insights) < 3:
+        derived = _derive_insights_from_table(table)
+        for s in derived:
+            if len(insights) >= 3:
+                break
+            if s and s not in insights:
+                insights.append(s)
 
     chart: ChartSpec | None = None
     if chart_type is not None:
@@ -266,7 +358,7 @@ def synthesise_results(question: str, plan_results: list[dict], schema: dict) ->
     )
 
 
-def _call_groq(*, system: str, user: str) -> str:
+def _call_groq(*, system: str, user: str, response_format: dict[str, Any] | None = None) -> str:
     headers = {
         "Authorization": f"Bearer {settings.GROQ_API_KEY}",
         "Content-Type": "application/json",
@@ -281,6 +373,9 @@ def _call_groq(*, system: str, user: str) -> str:
         "temperature": 0,
         "max_tokens": 600,
     }
+
+    if response_format is not None:
+        payload["response_format"] = response_format
 
     r = httpx.post(
         "https://api.groq.com/openai/v1/chat/completions",
@@ -308,10 +403,18 @@ def _parse_synthesis_json(text: str) -> dict[str, Any] | None:
     if not raw:
         return None
 
+    # Strict JSON parsing, but tolerant to leading/trailing non-JSON text.
     try:
         data = json.loads(raw)
     except Exception:
-        return None
+        try:
+            idx = raw.find("{")
+            if idx == -1:
+                return None
+            dec = json.JSONDecoder()
+            data, _ = dec.raw_decode(raw[idx:])
+        except Exception:
+            return None
 
     if not isinstance(data, dict):
         return None
@@ -325,33 +428,28 @@ def _parse_synthesis_json(text: str) -> dict[str, Any] | None:
     if not isinstance(answer, str) or not answer.strip():
         return None
 
-    if not isinstance(insights, list) or not insights or not all(isinstance(x, str) and x.strip() for x in insights):
-        return None
-
-    # Normalize insights length without failing hard.
-    insights_norm = [str(x).strip() for x in insights if str(x).strip()]
+    # Be tolerant: if the model doesn't perfectly follow the insights/chart fields,
+    # keep the answer and continue (we can derive insights from the table later).
+    insights_norm: list[str] = []
+    if isinstance(insights, list):
+        insights_norm = [str(x).strip() for x in insights if isinstance(x, str) and x.strip()]
+    elif isinstance(insights, str) and insights.strip():
+        # Sometimes models return a single string; split into bullets best-effort.
+        insights_norm = [s.strip(" -\t") for s in insights.splitlines() if s.strip()]
 
     allowed_chart_types = {"bar", "line", "scatter", "pie", "histogram"}
-    if chart_type is None:
-        chart_type_norm: str | None = None
-    elif isinstance(chart_type, str) and chart_type in allowed_chart_types:
+    chart_type_norm: str | None = None
+    if isinstance(chart_type, str) and chart_type in allowed_chart_types:
         chart_type_norm = chart_type
-    else:
-        return None
 
-    if chart_columns is None:
-        chart_cols_norm: list[str] | None = None
-    elif isinstance(chart_columns, list) and all(isinstance(c, str) and c.strip() for c in chart_columns):
-        chart_cols_norm = [c.strip() for c in chart_columns]
-    else:
-        return None
+    chart_cols_norm: list[str] | None = None
+    if isinstance(chart_columns, list):
+        cols = [c.strip() for c in chart_columns if isinstance(c, str) and c.strip()]
+        chart_cols_norm = cols or None
 
-    if table_from_tool is None:
-        table_from_tool_norm: str | None = None
-    elif isinstance(table_from_tool, str) and table_from_tool.strip():
+    table_from_tool_norm: str | None = None
+    if isinstance(table_from_tool, str) and table_from_tool.strip():
         table_from_tool_norm = table_from_tool.strip()
-    else:
-        return None
 
     return {
         "answer": answer.strip(),
@@ -364,18 +462,198 @@ def _parse_synthesis_json(text: str) -> dict[str, Any] | None:
 
 def _basic_fallback_response(question: str, plan_results: list[dict]) -> QueryResponse:
     q = (question or "").strip()
-    base = (
-        "I reviewed the available analysis outputs for your question. "
-        "I couldn’t generate a structured narrative summary from the tool results, so I returned the raw results for review."
-    )
-    if q:
-        base = (
-            f"I reviewed the available analysis outputs for the question: {q} "
-            "I couldn’t generate a structured narrative summary from the tool results, so I returned the raw results for review."
-        )
+    warnings: list[str] = []
+    warnings.extend(_step_error_warnings(plan_results if isinstance(plan_results, list) else []))
+    table, table_warnings = _select_table_from_results(plan_results if isinstance(plan_results, list) else [], None)
+    warnings.extend(table_warnings)
 
-    table, warnings = _select_table_from_results(plan_results if isinstance(plan_results, list) else [], None)
-    return QueryResponse(answer=base, insights=[], table=table, chart=None, warnings=warnings, query_type="analytical")
+    # Deterministic, non-LLM fallback synthesis so users still get a usable answer.
+    answer = "I computed the result and returned it in the table below."
+    if q:
+        answer = f"I computed the result for: {q} and returned it in the table below."
+    insights = _derive_insights_from_table(table)
+    if table is None:
+        answer = (
+            "I couldn’t produce a structured answer from tool outputs. "
+            "Try a slightly more specific question (e.g., name the target/label column) or run again."
+        )
+        if q:
+            answer = (
+                f"I couldn’t produce a structured answer for: {q}. "
+                "Try a slightly more specific question (e.g., name the target/label column) or run again."
+            )
+
+    return QueryResponse(answer=answer, insights=insights, table=table, chart=None, warnings=warnings, query_type="analytical")
+
+
+def _compact_plan_results_for_llm(plan_results: list[dict]) -> list[dict[str, Any]]:
+    """Reduce tool results into a bounded, JSON-friendly summary for the LLM."""
+
+    if not isinstance(plan_results, list):
+        return []
+
+    out: list[dict[str, Any]] = []
+    for r in plan_results[:8]:
+        if not isinstance(r, dict):
+            continue
+        tool = r.get("tool")
+        purpose = r.get("purpose")
+        err = r.get("error")
+        res = r.get("result")
+        out.append(
+            {
+                "tool": str(tool or ""),
+                "purpose": str(purpose or ""),
+                "error": (str(err) if err else None),
+                "result": _compact_result_for_llm(res),
+            }
+        )
+    return out
+
+
+def _compact_result_for_llm(value: Any) -> Any:
+    """Compact arbitrary tool outputs to keep prompts small and readable."""
+
+    max_rows = 15
+    max_items = 20
+    max_str = 1200
+
+    if value is None or isinstance(value, (bool, int, float)):
+        return value
+    if isinstance(value, str):
+        s = value.strip()
+        return s if len(s) <= max_str else s[: max_str - 1] + "…"
+
+    # Table-like dict from code_executor: {columns: [...], rows: [[...], ...]}
+    if isinstance(value, dict) and isinstance(value.get("columns"), list) and isinstance(value.get("rows"), list):
+        cols = [str(c) for c in (value.get("columns") or [])]
+        rows = value.get("rows") or []
+        if isinstance(rows, list):
+            rows_s = rows[:max_rows]
+        else:
+            rows_s = []
+        return {"columns": cols, "rows": rows_s, "row_count": len(rows) if isinstance(rows, list) else None}
+
+    if isinstance(value, list):
+        return [_compact_result_for_llm(v) for v in value[:max_items]]
+
+    if isinstance(value, dict):
+        keys = list(value.keys())[:max_items]
+        return {str(k): _compact_result_for_llm(value.get(k)) for k in keys}
+
+    return _json_safe(value)
+
+
+def _derive_insights_from_table(table: TableResult | None) -> list[str]:
+    """Heuristic insights from a small tabular result (no LLM)."""
+
+    if table is None or not table.columns or not table.rows:
+        return []
+
+    cols = [str(c) for c in table.columns]
+    rows = table.rows
+    # Look for a likely metric column.
+    metric_idx: int | None = None
+    metric_name: str | None = None
+    for i, c in enumerate(cols):
+        cl = c.lower()
+        if "rate" in cl or "pct" in cl or "percent" in cl or "approval" in cl:
+            metric_idx = i
+            metric_name = c
+            break
+    if metric_idx is None:
+        # fallback: second column if numeric-ish
+        if len(cols) >= 2:
+            metric_idx = 1
+            metric_name = cols[1]
+
+    def _to_float(x: Any) -> float | None:
+        try:
+            if x is None:
+                return None
+            return float(x)
+        except Exception:
+            return None
+
+    if metric_idx is None:
+        return []
+
+    scored: list[tuple[int, float]] = []
+    for i, r in enumerate(rows[:200]):
+        if not isinstance(r, list) or metric_idx >= len(r):
+            continue
+        v = _to_float(r[metric_idx])
+        if v is None:
+            continue
+        scored.append((i, v))
+    if not scored:
+        return []
+
+    scored.sort(key=lambda t: t[1])
+    lo_i, lo_v = scored[0]
+    hi_i, hi_v = scored[-1]
+
+    # Use the first non-metric column as a label when possible.
+    label_idx = 0 if metric_idx != 0 else (1 if len(cols) > 1 else 0)
+
+    def _label(row_idx: int) -> str:
+        try:
+            r = rows[row_idx]
+            if isinstance(r, list) and label_idx < len(r):
+                return str(r[label_idx])
+        except Exception:
+            pass
+        return "(row)"
+
+    metric_label = metric_name or "metric"
+    insights = [
+        f"Highest {metric_label} was {hi_v:.3g} for {_label(hi_i)}.",
+        f"Lowest {metric_label} was {lo_v:.3g} for {_label(lo_i)}.",
+        f"Returned {min(len(rows), 200)} rows in the table." if len(rows) != 1 else "Returned 1 row in the table.",
+    ]
+    return insights[:5]
+
+
+def _sanitize_pandas_code(code: str) -> str:
+    """Remove common LLM boilerplate that our sandbox blocks.
+
+    The sandbox forbids import statements; LLMs often include `import pandas as pd`
+    out of habit. Stripping these lines makes execution more robust.
+    """
+
+    if not isinstance(code, str):
+        return ""
+    lines = []
+    for raw_line in code.splitlines():
+        line = raw_line.rstrip("\r\n")
+        stripped = line.lstrip()
+        low = stripped.lower()
+        if low.startswith("import ") or low.startswith("from "):
+            continue
+        lines.append(line)
+    return "\n".join(lines).strip()
+
+
+def _step_error_warnings(plan_results: list[dict]) -> list[str]:
+    """Surface tool execution failures as warnings in the final response."""
+
+    if not isinstance(plan_results, list):
+        return []
+
+    warnings: list[str] = []
+    for r in plan_results:
+        if not isinstance(r, dict):
+            continue
+        tool = r.get("tool")
+        err = r.get("error")
+        if not err:
+            continue
+        t = tool if isinstance(tool, str) and tool else "tool"
+        e = str(err)
+        warnings.append(f"{t} failed: {e}")
+
+    # Keep it subtle: cap the number of surfaced errors.
+    return warnings[:3]
 
 
 def _select_table_from_results(

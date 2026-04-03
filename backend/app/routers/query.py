@@ -4,10 +4,12 @@ import logging
 import time
 from typing import Any
 import uuid
+import datetime
 
 import httpx
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 from pydantic import BaseModel
+from sqlalchemy.orm import sessionmaker
 from sqlalchemy.orm import Session
 
 from app.config import settings
@@ -21,7 +23,7 @@ from app.services.ml_handler import handle_ml_query
 from app.services.query_classifier import classify_query
 from app.services.agent_planner import execute_plan, plan_query, synthesise_results
 from app.middleware.logging_middleware import get_request_id
-from app.utils.database import get_db
+from app.utils.database import get_db, get_engine
 
 
 router = APIRouter(tags=["Query"])
@@ -34,7 +36,12 @@ class QueryRequest(BaseModel):
 
 
 @router.post("/query", response_model=QueryResponse, summary="Ask a question about a dataset")
-async def query_dataset(request: QueryRequest, mode: str | None = None, db: Session = Depends(get_db)):
+async def query_dataset(
+    request: QueryRequest,
+    background_tasks: BackgroundTasks,
+    mode: str | None = None,
+    db: Session = Depends(get_db),
+):
     start = time.perf_counter()
     request_id = get_request_id()
     question = (request.question or "").strip()
@@ -89,7 +96,13 @@ async def query_dataset(request: QueryRequest, mode: str | None = None, db: Sess
             response = handle_analytical(df, question, _groq_callable)
         else:
             fact_cache = getattr(dataset, "fact_cache", None)
-            plan_steps = plan_query(question, schema, fact_cache or {})
+            request_fact_cache: dict[str, Any]
+            if isinstance(fact_cache, dict):
+                request_fact_cache = dict(fact_cache)
+            else:
+                request_fact_cache = {}
+
+            plan_steps = plan_query(question, schema, request_fact_cache, dataset_id=str(dataset.id))
             plan_tools_used = []
             seen: set[str] = set()
             for step in plan_steps:
@@ -100,22 +113,45 @@ async def query_dataset(request: QueryRequest, mode: str | None = None, db: Sess
                     seen.add(tool)
                     plan_tools_used.append(tool)
 
-            results = execute_plan(plan_steps, df, fact_cache or {})
+            related_history = request_fact_cache.get("related_history")
+            if not isinstance(related_history, list):
+                related_history = []
+
+            related_history_sanitized: list[dict[str, Any]] = []
+            for item in related_history:
+                if not isinstance(item, dict):
+                    continue
+                qh = str(item.get("question") or "").strip()
+                ah = str(item.get("answer_summary") or "").strip()
+                try:
+                    sc = float(item.get("score") or 0.0)
+                except Exception:
+                    sc = 0.0
+                if not qh or not ah:
+                    continue
+                related_history_sanitized.append({"question": qh, "answer_summary": ah, "score": sc})
+
+            results = execute_plan(plan_steps, df, request_fact_cache)
             response = synthesise_results(question, results, schema)
 
-    try:
-        history_entry = QueryHistory(
-            dataset_id=dataset.id,
-            question=question,
-            response_json=response.model_dump(mode="json"),
-            query_type=response.query_type,
-        )
-        db.add(history_entry)
-        db.commit()
-        db.refresh(history_entry)
-    except Exception:
-        logger.exception("failed_persist_query_history", extra={"dataset_id": str(dataset.id)})
-        response.warnings.append("failed to persist query history")
+            try:
+                response = response.model_copy(update={"related_history": related_history_sanitized})
+            except Exception:
+                # Non-fatal: response still returns without related history.
+                pass
+
+    # Persist query history in the background (do not block response).
+    response_json = response.model_dump(mode="json")
+    answer_summary = (str(getattr(response, "answer", "") or "")[:200]).strip()
+    background_tasks.add_task(
+        _persist_query_history_background,
+        dataset_id=dataset.id,
+        question=question,
+        query_type=response.query_type,
+        response_json=response_json,
+        answer_summary=answer_summary,
+        request_id=request_id,
+    )
 
     total_duration_ms = int((time.perf_counter() - start) * 1000)
     logger.info(
@@ -130,6 +166,62 @@ async def query_dataset(request: QueryRequest, mode: str | None = None, db: Sess
     )
 
     return response
+
+
+def _persist_query_history_background(
+    *,
+    dataset_id: uuid.UUID,
+    question: str,
+    query_type: str,
+    response_json: dict[str, Any],
+    answer_summary: str,
+    request_id: str | None,
+) -> None:
+    """Best-effort persistence of query history.
+
+    Must never raise.
+    """
+
+    try:
+        SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=get_engine())
+        db = SessionLocal()
+    except Exception:
+        logger.exception("query_history_session_init_failed", extra={"request_id": request_id})
+        return
+
+    try:
+        question_embedding: list[float] | None = None
+        try:
+            # Local import so the router can load even when embeddings deps are missing.
+            from app.services.embedding_service import get_embedding_service
+
+            question_embedding = get_embedding_service().embed([question])[0]
+        except Exception:
+            # Embedding is optional; keep the record without it.
+            logger.info("query_history_embedding_unavailable", extra={"request_id": request_id})
+
+        entry = QueryHistory(
+            dataset_id=dataset_id,
+            question=question,
+            question_embedding=question_embedding,
+            answer_summary=answer_summary,
+            response_json=response_json,
+            query_type=query_type,
+            created_at=datetime.datetime.now(datetime.UTC),
+        )
+
+        db.add(entry)
+        db.commit()
+    except Exception:
+        logger.exception(
+            "failed_persist_query_history",
+            extra={"dataset_id": str(dataset_id), "request_id": request_id},
+        )
+    finally:
+        try:
+            db.close()
+        except Exception:
+            pass
 
 
 def _groq_callable(*, system: str, user: str) -> str:

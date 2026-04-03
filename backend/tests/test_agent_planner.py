@@ -71,6 +71,57 @@ def test_plan_query_invalid_json_falls_back(monkeypatch: pytest.MonkeyPatch) -> 
     assert out == [{"tool": "describe", "args": {}, "purpose": "fallback"}]
 
 
+def test_plan_query_injects_related_history_into_system_prompt(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(settings, "GROQ_API_KEY", "test")
+    monkeypatch.setattr(settings, "GROQ_MODEL", "test-model")
+
+    import app.services.agent_planner as planner
+    import app.services.history_service as history_service
+
+    def fake_search_history(question: str, dataset_id: str, top_k: int = 3) -> list[dict[str, Any]]:
+        return [
+            {
+                "id": "1",
+                "question": "Past Q",
+                "answer_summary": "Past A",
+                "query_type": "analytical",
+                "score": 0.81234,
+                "created_at": "2026-01-01T00:00:00Z",
+            }
+        ]
+
+    monkeypatch.setattr(history_service, "search_history", fake_search_history)
+
+    captured: dict[str, str] = {"system": ""}
+
+    def fake_post(*args: Any, **kwargs: Any) -> _DummyResponse:
+        payload = kwargs.get("json") or {}
+        msgs = payload.get("messages") or []
+        captured["system"] = msgs[0]["content"]
+        return _DummyResponse(
+            payload={
+                "choices": [
+                    {
+                        "message": {
+                            "content": '[{"tool":"describe","args":{},"purpose":"overview"}]'
+                        }
+                    }
+                ]
+            }
+        )
+
+    monkeypatch.setattr(planner.httpx, "post", fake_post)
+
+    fc: dict[str, Any] = {}
+    out = plan_query("Q", {"columns": ["a"]}, fc, dataset_id="ds1")
+    assert out == [{"tool": "describe", "args": {}, "purpose": "overview"}]
+    assert "Dataset schema:" in captured["system"]
+    assert "Relevant findings from previous analyses of this dataset:" in captured["system"]
+    assert "- Past Q: Past A (similarity: 0.812" in captured["system"]
+    assert isinstance(fc.get("related_history"), list)
+    assert fc["related_history"][0]["question"] == "Past Q"
+
+
 def test_plan_query_missing_api_key_falls_back(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(settings, "GROQ_API_KEY", "")
     out = plan_query("Anything", {}, {})

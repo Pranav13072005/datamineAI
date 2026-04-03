@@ -24,6 +24,10 @@ export const datasetAPI = {
   // Get cached dataset insights
   getInsights: (datasetId) => apiClient.get(`/datasets/${datasetId}/insights`),
 
+  // Get query history for the history panel
+  getHistory: (datasetId, limit = 20) =>
+    apiClient.get(`/datasets/${datasetId}/history`, { params: { limit } }),
+
   // Delete a dataset
   delete: (datasetId) => apiClient.delete(`/datasets/${datasetId}`),
 };

@@ -28,6 +28,7 @@ from app.schemas.dataset import (
 from app.services.dataset_service import delete_dataset_file, get_schema, load_dataset, save_dataset
 from app.services.embedding_service import get_embedding_service
 from app.services.insight_extractor import compute_ml_insights, extract_insights
+from app.services.history_service import get_dataset_history as _get_dataset_history
 from app.utils.database import get_db, get_engine
 
 
@@ -49,6 +50,15 @@ class UploadResponse(BaseModel):
     row_count: int
     columns: list[str]
     message: str
+
+
+class DatasetHistoryEntry(BaseModel):
+    id: str
+    question: str
+    answer_summary: str | None = None
+    response_json: dict[str, Any] | None = None
+    query_type: str
+    created_at: str | None = None
 
 
 @router.post("/upload", response_model=UploadResponse, summary="Upload a CSV dataset")
@@ -609,6 +619,39 @@ def get_dataset_insights(dataset_id: str, db: Session = Depends(get_db)) -> Data
         insights=fact_cache if isinstance(fact_cache, dict) else {"value": fact_cache},
         generated_at=getattr(dataset, "created_at", None),
     )
+
+
+@router.get("/{dataset_id}/history", response_model=list[DatasetHistoryEntry], summary="Get dataset query history")
+def get_dataset_query_history(
+    dataset_id: str,
+    limit: int = Query(20, ge=1, le=100),
+    db: Session = Depends(get_db),
+) -> list[DatasetHistoryEntry]:
+    try:
+        dataset_uuid = uuid.UUID(dataset_id)
+    except ValueError:
+        raise HTTPException(status_code=422, detail="dataset_id must be a valid UUID")
+
+    dataset = db.query(Dataset).filter(Dataset.id == dataset_uuid).first()
+    if not dataset:
+        raise HTTPException(status_code=404, detail=f"Dataset '{dataset_id}' not found")
+
+    rows = _get_dataset_history(dataset_id, limit=int(limit))
+    out: list[DatasetHistoryEntry] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        out.append(
+            DatasetHistoryEntry(
+                id=str(row.get("id") or ""),
+                question=str(row.get("question") or ""),
+                answer_summary=(str(row.get("answer_summary") or "") or None),
+                response_json=(row.get("response_json") if isinstance(row.get("response_json"), dict) else None),
+                query_type=str(row.get("query_type") or ""),
+                created_at=(str(row.get("created_at") or "") or None),
+            )
+        )
+    return out
 
 
 @router.delete("/{dataset_id}", summary="Delete dataset")

@@ -23,6 +23,9 @@ def _configure_test_environment() -> None:
     os.environ.setdefault("ENVIRONMENT", "test")
     # Requirement: override DB_URL env var
     os.environ["DB_URL"] = "sqlite+pysqlite:///:memory:"
+    # Ensure no other DB setting overrides DB_URL (Settings prefers DATABASE_URL).
+    os.environ["DATABASE_URL"] = ""
+    os.environ["URL_SUPABASE"] = ""
 
     # Refresh Settings so it sees env overrides
     import app.config as config
