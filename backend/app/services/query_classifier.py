@@ -100,10 +100,17 @@ def classify_query(question: str, schema: dict) -> str:
         return "correlation"
 
     # Descriptive / dataset overview
+    # Treat "summarize/summary" as descriptive only when the intent is clearly
+    # a dataset-level overview (not an analysis grouped "by" something).
+    if (
+        ("summarize" in toks or "summary" in toks)
+        and ("dataset" in toks or "data" in toks)
+        and "by" not in toks
+    ):
+        return "descriptive"
+
     descriptive_phrases = (
         "describe",
-        "summary",
-        "summarize",
         "overview",
         "tell me about",
         "about the data",
