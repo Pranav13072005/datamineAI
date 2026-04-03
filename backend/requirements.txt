@@ -17,3 +17,5 @@ pytest-asyncio
 RestrictedPython
 scikit-learn
 statsmodels
+pgvector
+sentence-transformers

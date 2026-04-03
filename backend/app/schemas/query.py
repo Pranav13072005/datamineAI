@@ -100,6 +100,7 @@ class QueryResponse(BaseModel):
         "analytical",
         "descriptive",
         "smalltalk",
+        "correlation",
         "anomaly",
         "clustering",
         "forecast",

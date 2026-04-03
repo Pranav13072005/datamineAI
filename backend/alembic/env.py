@@ -6,7 +6,7 @@ import os
 from typing import Any
 
 from alembic import context
-from sqlalchemy import pool
+from sqlalchemy import engine_from_config, pool
 from sqlalchemy.engine.url import make_url
 from sqlalchemy.ext.asyncio import async_engine_from_config
 
@@ -25,14 +25,28 @@ def _get_database_url() -> str:
 
     from app.config import settings
 
-    return settings.SQLALCHEMY_DATABASE_URI or "sqlite:///./local.db"
+    url = settings.SQLALCHEMY_DATABASE_URI
+    if url:
+        return url
+
+    # Important: do NOT silently fall back to SQLite for Alembic.
+    # This can trick you into thinking migrations ran on Postgres when they
+    # actually created a local SQLite file.
+    if os.getenv("ALEMBIC_ALLOW_SQLITE") == "1":
+        return "sqlite:///./local.db"
+
+    raise RuntimeError(
+        "DATABASE_URL is not set (and Settings.SQLALCHEMY_DATABASE_URI is empty). "
+        "Set DATABASE_URL (or DB_URL/URL_SUPABASE) to your Postgres connection string before running Alembic."
+    )
 
 
-def _as_async_url(url: str) -> str:
-    """Coerce SQLAlchemy URL into an async-driver URL when possible.
+def _normalize_url(url: str) -> str:
+    """Normalize URL without forcing an async driver.
 
-    Alembic can run in async mode even if the application uses sync SQLAlchemy.
-    For Postgres we prefer asyncpg.
+    On Windows, asyncpg connectivity can be less reliable for some hosted
+    Postgres setups. We therefore only use async migrations when the URL
+    explicitly selects an async driver (e.g. postgresql+asyncpg://...).
     """
 
     try:
@@ -40,19 +54,33 @@ def _as_async_url(url: str) -> str:
     except Exception:
         return url
 
-    drivername = parsed.drivername
-
     # Normalize postgres scheme aliases
-    if drivername == "postgres":
-        drivername = "postgresql"
-        parsed = parsed.set(drivername=drivername)
+    if parsed.drivername == "postgres":
+        parsed = parsed.set(drivername="postgresql")
 
-    if drivername.startswith("postgresql"):
-        if "+asyncpg" in drivername:
-            return str(parsed)
-        return str(parsed.set(drivername="postgresql+asyncpg"))
+    # IMPORTANT: In SQLAlchemy 2.x, `str(URL)` renders with the password hidden
+    # (replaced by "***"). Using that string for actual connections breaks
+    # authentication. Always render with hide_password=False for real use.
+    return parsed.render_as_string(hide_password=False)
 
-    return str(parsed)
+
+def _safe_url_for_logs(url: str) -> str:
+    """Return a version of the DB URL safe to print (no password)."""
+
+    try:
+        parsed = make_url(url)
+        return str(parsed.set(password="***"))
+    except Exception:
+        return "<unparseable url>"
+
+
+def _is_async_driver(url: str) -> bool:
+    try:
+        drivername = make_url(url).drivername
+    except Exception:
+        return False
+
+    return drivername.endswith("+asyncpg") or drivername.endswith("+aiosqlite")
 
 
 # Import models so metadata is populated
@@ -63,7 +91,7 @@ target_metadata = Base.metadata
 
 
 def run_migrations_offline() -> None:
-    url = _as_async_url(_get_database_url())
+    url = _normalize_url(_get_database_url())
     context.configure(
         url=url,
         target_metadata=target_metadata,
@@ -84,13 +112,32 @@ def _do_run_migrations(connection) -> None:
 
 async def run_migrations_online() -> None:
     configuration: dict[str, Any] = config.get_section(config.config_ini_section, {})
-    configuration["sqlalchemy.url"] = _as_async_url(_get_database_url())
+    url = _normalize_url(_get_database_url())
+    configuration["sqlalchemy.url"] = url
+
+    if os.getenv("ALEMBIC_SHOW_URL") == "1":
+        print(f"[alembic] sqlalchemy.url={_safe_url_for_logs(url)}")
+
+    # Prefer sync migrations unless an async driver is explicitly selected.
+    if not _is_async_driver(url):
+        connectable = engine_from_config(
+            configuration,
+            prefix="sqlalchemy.",
+            poolclass=pool.NullPool,
+            future=True,
+        )
+
+        with connectable.connect() as connection:
+            _do_run_migrations(connection)
+        return
 
     connectable = async_engine_from_config(
         configuration,
         prefix="sqlalchemy.",
         poolclass=pool.NullPool,
         future=True,
+        # Hosted Postgres commonly requires TLS; asyncpg expects an explicit ssl flag.
+        connect_args={"ssl": True} if url.startswith("postgresql+asyncpg") else {},
     )
 
     async with connectable.connect() as connection:
