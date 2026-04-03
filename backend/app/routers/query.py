@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import time
 from typing import Any
 import uuid
 
@@ -18,6 +19,8 @@ from app.services.descriptive_handler import handle_descriptive
 from app.services.correlation_handler import handle_correlation_query
 from app.services.ml_handler import handle_ml_query
 from app.services.query_classifier import classify_query
+from app.services.agent_planner import execute_plan, plan_query, synthesise_results
+from app.middleware.logging_middleware import get_request_id
 from app.utils.database import get_db
 
 
@@ -31,7 +34,9 @@ class QueryRequest(BaseModel):
 
 
 @router.post("/query", response_model=QueryResponse, summary="Ask a question about a dataset")
-async def query_dataset(request: QueryRequest, db: Session = Depends(get_db)):
+async def query_dataset(request: QueryRequest, mode: str | None = None, db: Session = Depends(get_db)):
+    start = time.perf_counter()
+    request_id = get_request_id()
     question = (request.question or "").strip()
     if not question:
         raise HTTPException(status_code=422, detail="Question cannot be empty.")
@@ -60,6 +65,9 @@ async def query_dataset(request: QueryRequest, db: Session = Depends(get_db)):
     query_type = classify_query(question, schema)
     logger.info("query_classified", extra={"query_type": query_type})
 
+    plan_steps: list[dict[str, Any]] = []
+    plan_tools_used: list[str] = []
+
     response: QueryResponse
     if query_type == "smalltalk":
         response = QueryResponse(
@@ -76,7 +84,24 @@ async def query_dataset(request: QueryRequest, db: Session = Depends(get_db)):
     elif query_type in {"anomaly", "clustering", "forecast"}:
         response = handle_ml_query(query_type, question, getattr(dataset, "fact_cache", None))
     else:
-        response = handle_analytical(df, question, _groq_callable)
+        is_fast = (mode or "").strip().lower() == "fast"
+        if is_fast:
+            response = handle_analytical(df, question, _groq_callable)
+        else:
+            fact_cache = getattr(dataset, "fact_cache", None)
+            plan_steps = plan_query(question, schema, fact_cache or {})
+            plan_tools_used = []
+            seen: set[str] = set()
+            for step in plan_steps:
+                if not isinstance(step, dict):
+                    continue
+                tool = step.get("tool")
+                if isinstance(tool, str) and tool and tool not in seen:
+                    seen.add(tool)
+                    plan_tools_used.append(tool)
+
+            results = execute_plan(plan_steps, df, fact_cache or {})
+            response = synthesise_results(question, results, schema)
 
     try:
         history_entry = QueryHistory(
@@ -91,6 +116,18 @@ async def query_dataset(request: QueryRequest, db: Session = Depends(get_db)):
     except Exception:
         logger.exception("failed_persist_query_history", extra={"dataset_id": str(dataset.id)})
         response.warnings.append("failed to persist query history")
+
+    total_duration_ms = int((time.perf_counter() - start) * 1000)
+    logger.info(
+        "query_completed",
+        extra={
+            "request_id": request_id,
+            "question": question,
+            "plan_steps": plan_steps,
+            "plan_tools_used": plan_tools_used,
+            "total_duration_ms": total_duration_ms,
+        },
+    )
 
     return response
 

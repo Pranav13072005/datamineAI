@@ -38,6 +38,12 @@ def test_descriptive_missing_duplicates() -> None:
     assert classify_query("summarize missing values and duplicates", schema) == "descriptive"
 
 
+def test_analytical_even_if_says_summarize() -> None:
+    schema = {"columns": ["LoanAmount", "ApplicantIncome", "Loan_Status"]}
+    q = "Is LoanAmount / ApplicantIncome (loan burden) related to approval? Summarize by burden quartiles"
+    assert classify_query(q, schema) == "analytical"
+
+
 def test_analytical_when_column_name_mentioned() -> None:
     schema = {"columns": ["total_sales", "product"]}
     assert classify_query("What is the total_sales for each product?", schema) == "analytical"

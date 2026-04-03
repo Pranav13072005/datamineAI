@@ -6,16 +6,25 @@ import logging
 from typing import Any
 
 import numpy as np
-from sentence_transformers import SentenceTransformer
 from sqlalchemy import bindparam, text
-
-from pgvector.sqlalchemy import Vector
 
 from app.config import settings
 from app.utils.database import get_engine
 
 
 logger = logging.getLogger(__name__)
+
+
+try:
+    from sentence_transformers import SentenceTransformer as _SentenceTransformer  # type: ignore
+except Exception:  # pragma: no cover
+    _SentenceTransformer = None
+
+
+try:
+    from pgvector.sqlalchemy import Vector as _Vector  # type: ignore
+except Exception:  # pragma: no cover
+    _Vector = None
 
 
 def _json_safe(obj: Any) -> Any:
@@ -56,8 +65,12 @@ class EmbeddingService:
 
     def __init__(self, model_name: str | None = None):
         self.model_name = model_name or settings.EMBEDDING_MODEL
+        if _SentenceTransformer is None:
+            raise RuntimeError(
+                "sentence-transformers is not installed; install it to enable semantic column search"
+            )
         # Loads weights (may download on first run)
-        self._model = SentenceTransformer(self.model_name)
+        self._model = _SentenceTransformer(self.model_name)
 
     def embed(self, texts: list[str]) -> list[list[float]]:
         """Embed texts into 384-dim vectors.
@@ -101,6 +114,9 @@ class EmbeddingService:
             logger.info("column_search_skipped_non_postgres", extra={"dialect": engine.dialect.name})
             return []
 
+        if _Vector is None:
+            raise RuntimeError("pgvector is not installed; install it to enable semantic column search")
+
         query_vec = self.embed([query])[0]
 
         stmt = (
@@ -118,7 +134,7 @@ class EmbeddingService:
                 """
             )
             .bindparams(
-                bindparam("query_vec", value=query_vec, type_=Vector(384)),
+                bindparam("query_vec", value=query_vec, type_=_Vector(384)),
                 bindparam("top_k", value=int(top_k)),
             )
         )
